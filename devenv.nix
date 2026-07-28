@@ -11,10 +11,6 @@
         install.enable = true;
       };
     };
-    typescript = {
-      enable = true;
-      lsp.package = pkgs.typescript-go;
-    };
   };
 
   git-hooks.hooks = {
