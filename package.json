@@ -1,0 +1,51 @@
+{
+  "name": "@phrmendes/pi-plan-mode",
+  "version": "1.0.0",
+  "description": "Plan mode for the pi coding agent: gated brainstorming, plan proposals with an approval dialog, and time-boxed implementation windows",
+  "license": "Apache-2.0",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "src",
+    "skills"
+  ],
+  "scripts": {
+    "test": "node --test src/index.test.ts",
+    "typecheck": "tsc --noEmit --strict --allowImportingTsExtensions --module nodenext --target esnext --skipLibCheck src/index.ts src/index.test.ts"
+  },
+  "dependencies": {
+    "marked": "^18.0.5",
+    "shell-quote": "^1.8.4"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@earendil-works/pi-tui": "0.80.7",
+    "typescript": "latest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "brace-expansion": "^5.0.8"
+    }
+  },
+  "packageManager": "pnpm@11.17.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phrmendes/pi-plan-mode.git"
+  },
+  "bugs": "https://github.com/phrmendes/pi-plan-mode/issues",
+  "homepage": "https://github.com/phrmendes/pi-plan-mode",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

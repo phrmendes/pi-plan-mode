@@ -1,0 +1,5 @@
+# build scripts of transitive dev dependencies are not needed for
+# tests or typecheck
+allowBuilds:
+  "@google/genai": false
+  protobufjs: false
