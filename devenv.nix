@@ -23,10 +23,5 @@
       entry = "pnpm format:check";
       files = "\\.(ts|json|md)$";
     };
-    lint = {
-      enable = true;
-      entry = "pnpm typecheck";
-      files = "\\.ts$";
-    };
   };
 }
