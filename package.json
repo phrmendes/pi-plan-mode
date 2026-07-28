@@ -13,7 +13,10 @@
   ],
   "scripts": {
     "test": "node --test src/index.test.ts",
-    "typecheck": "tsc --noEmit --strict --allowImportingTsExtensions --module nodenext --target esnext --skipLibCheck src/index.ts src/index.test.ts"
+    "typecheck": "tsc",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
+    "lint": "tsc"
   },
   "dependencies": {
     "marked": "^18.0.5",
@@ -22,7 +25,11 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.7",
     "@earendil-works/pi-tui": "0.80.7",
-    "typescript": "latest"
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "typescript": "latest",
+    "typescript-eslint": "^8.65.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

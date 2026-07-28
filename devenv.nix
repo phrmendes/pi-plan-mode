@@ -3,15 +3,30 @@
 {
   name = "pi-plan-mode";
 
-  languages.javascript = {
-    enable = true;
-    pnpm = {
+  languages = {
+    javascript = {
       enable = true;
-      install.enable = true;
+      pnpm = {
+        enable = true;
+        install.enable = true;
+      };
+    };
+    typescript = {
+      enable = true;
+      lsp.package = pkgs.typescript-go;
     };
   };
 
-  # languages.typescript ships the classic tsc; tsgo provides both the
-  # compiler (tsc/tsgo) and the LSP
-  packages = [ pkgs.typescript-go ];
+  git-hooks.hooks = {
+    format = {
+      enable = true;
+      entry = "pnpm format:check";
+      files = "\\.(ts|json|md)$";
+    };
+    lint = {
+      enable = true;
+      entry = "pnpm typecheck";
+      files = "\\.ts$";
+    };
+  };
 }

@@ -39,6 +39,7 @@ function createHarness(opts: HarnessOpts = {}) {
     let activeTools = opts.tools ?? [...FULL_TOOLS];
     const appended: Array<{ state?: string; creating?: boolean; steps?: unknown[] }> = [];
     const sent: string[] = [];
+    const sentOpts: Array<{ deliverAs?: string } | undefined> = [];
     const notes: string[] = [];
     let status: string | undefined;
     const statuses: Array<string | undefined> = [];
@@ -46,19 +47,30 @@ function createHarness(opts: HarnessOpts = {}) {
 
     const pi = {
         registerCommand: (name: string, def: any) => void commands.set(name, def),
-        registerShortcut: (key: string, def: any) => { shortcutKey = key; shortcutHandler = def.handler; },
+        registerShortcut: (key: string, def: any) => {
+            shortcutKey = key;
+            shortcutHandler = def.handler;
+        },
         on: (event: string, fn: any) => void events.set(event, fn),
         appendEntry: (_type: string, data: any) => void appended.push(data),
-        sendUserMessage: (msg: string) => void sent.push(msg),
+        sendUserMessage: (msg: string, opts?: { deliverAs?: string }) => void (sent.push(msg), sentOpts.push(opts)),
         getActiveTools: () => [...activeTools],
-        setActiveTools: (tools: string[]) => { activeTools = [...tools]; },
+        setActiveTools: (tools: string[]) => {
+            activeTools = [...tools];
+        },
     };
     const ctx = {
         hasUI: true,
         ui: {
-            setStatus: (_key: string, value?: string) => { status = value; statuses.push(value); },
+            setStatus: (_key: string, value?: string) => {
+                status = value;
+                statuses.push(value);
+            },
             notify: (msg: string) => void notes.push(msg),
-            select: async () => { selectCalls++; return opts.selectChoice; },
+            select: async () => {
+                selectCalls++;
+                return opts.selectChoice;
+            },
         },
         sessionManager: { getEntries: () => opts.entries ?? [] },
     };
@@ -66,7 +78,10 @@ function createHarness(opts: HarnessOpts = {}) {
     planMode(pi as any);
 
     return {
-        sent, notes, appended,
+        sent,
+        sentOpts,
+        notes,
+        appended,
         start: () => events.get("session_start")!({}, ctx),
         cycle: () => shortcutHandler!(ctx),
         command: (args: string) => commands.get("plan")!.handler(args, ctx),
@@ -75,7 +90,8 @@ function createHarness(opts: HarnessOpts = {}) {
             const home = process.env.HOME;
             process.env.HOME = "/nonexistent";
             try {
-                return events.get("before_agent_start")!() as { message?: { customType?: string; content?: string } } | undefined;
+                return events.get("before_agent_start")!() as
+                    { message?: { customType?: string; content?: string } } | undefined;
             } finally {
                 process.env.HOME = home;
             }
@@ -83,11 +99,21 @@ function createHarness(opts: HarnessOpts = {}) {
         /** Simulates a finished agent turn that produced no relevant messages. */
         endTurn: () => events.get("agent_end")!({ messages: [] }, ctx),
         toolCall: (toolName: string, command: string) => events.get("tool_call")!({ toolName, input: { command } }),
-        get activeTools() { return activeTools; },
-        get status() { return status; },
-        get planStatuses() { return statuses.filter(s => s?.startsWith("plan: ")); },
-        get shortcutKey() { return shortcutKey; },
-        get selectCalls() { return selectCalls; },
+        get activeTools() {
+            return activeTools;
+        },
+        get status() {
+            return status;
+        },
+        get planStatuses() {
+            return statuses.filter((s) => s?.startsWith("plan: "));
+        },
+        get shortcutKey() {
+            return shortcutKey;
+        },
+        get selectCalls() {
+            return selectCalls;
+        },
         lastNote: () => notes[notes.length - 1],
     };
 }
@@ -126,16 +152,15 @@ test("create flow: draft → proposing → accept → implementing → auto-retu
 
     h.command("create");
     assert.deepEqual(h.sent, ["Produce the formal plan now."]);
+    assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
 
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.selectCalls, 1);
-    assert.deepEqual(
-        h.planStatuses,
-        ["plan: brainstorming", "plan: proposing", "plan: implementing"],
-    );
+    assert.deepEqual(h.planStatuses, ["plan: brainstorming", "plan: proposing", "plan: implementing"]);
     assert.equal(h.status, "plan: implementing");
     assert.deepEqual(h.activeTools, FULL_TOOLS);
     assert.equal(h.sent.at(-1), "The plan is accepted. Begin implementation now.");
+    assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
 
     await h.endTurn();
     assert.equal(h.status, "plan: brainstorming");
@@ -206,7 +231,11 @@ test("disable exits plan mode, restores tools, clears steps", async () => {
 });
 
 test("legacy entries map enabled/steps onto states", () => {
-    const fresh = (data: unknown) => { const h = createHarness({ entries: [entry(data)] }); h.start(); return h; };
+    const fresh = (data: unknown) => {
+        const h = createHarness({ entries: [entry(data)] });
+        h.start();
+        return h;
+    };
 
     const legacyBrainstorm = fresh({ enabled: true, creating: false, steps: [] });
     assert.equal(legacyBrainstorm.status, "plan: brainstorming");

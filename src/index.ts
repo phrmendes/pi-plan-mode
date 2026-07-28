@@ -7,15 +7,101 @@ import { marked } from "marked";
 
 const WRITE_TOOLS = new Set(["edit", "write"]);
 
-const SAFE_TOOLS = new Set(["agent-browser", "bat", "cat", "cd", "curl", "date", "df", "diff", "du", "echo", "eza", "false", "fd", "file", "find", "grep", "head", "id", "jira", "jq", "less", "ls", "more", "ps", "pwd", "readlink", "rg", "sort", "stat", "tail", "tree", "true", "type", "uname", "uniq", "wc", "which", "whoami", "xargs"]);
+const SAFE_TOOLS = new Set([
+    "agent-browser",
+    "bat",
+    "cat",
+    "cd",
+    "curl",
+    "date",
+    "df",
+    "diff",
+    "du",
+    "echo",
+    "eza",
+    "false",
+    "fd",
+    "file",
+    "find",
+    "grep",
+    "head",
+    "id",
+    "jira",
+    "jq",
+    "less",
+    "ls",
+    "more",
+    "ps",
+    "pwd",
+    "readlink",
+    "rg",
+    "sort",
+    "stat",
+    "tail",
+    "tree",
+    "true",
+    "type",
+    "uname",
+    "uniq",
+    "wc",
+    "which",
+    "whoami",
+    "xargs",
+]);
 
 const SAFE_SUBCOMMANDS: Record<string, string[]> = {
     git: ["status", "log", "diff", "show", "branch", "remote", "ls-files", "ls-tree"],
-    kubectl: ["get", "describe", "logs", "top", "explain", "version", "cluster-info", "api-resources", "api-versions", "events", "auth", "config", "diff", "rollout"],
-    gh: ["issue", "pr", "repo", "run", "search", "status", "auth", "browse", "label", "milestone", "project", "release", "gist", "codespace", "workflow", "extension"],
+    kubectl: [
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "explain",
+        "version",
+        "cluster-info",
+        "api-resources",
+        "api-versions",
+        "events",
+        "auth",
+        "config",
+        "diff",
+        "rollout",
+    ],
+    gh: [
+        "issue",
+        "pr",
+        "repo",
+        "run",
+        "search",
+        "status",
+        "auth",
+        "browse",
+        "label",
+        "milestone",
+        "project",
+        "release",
+        "gist",
+        "codespace",
+        "workflow",
+        "extension",
+    ],
     gcloud: ["version", "info", "config", "list", "describe"],
     nix: ["eval", "search", "show-config", "path-info", "why-depends", "log", "flake", "repl"],
-    systemctl: ["status", "list-units", "list-automounts", "list-paths", "list-sockets", "list-timers", "is-active", "is-failed", "show", "cat", "list-dependencies", "is-enabled", "is-system-running"],
+    systemctl: [
+        "status",
+        "list-units",
+        "list-automounts",
+        "list-paths",
+        "list-sockets",
+        "list-timers",
+        "is-active",
+        "is-failed",
+        "show",
+        "cat",
+        "list-dependencies",
+        "is-enabled",
+        "is-system-running",
+    ],
 };
 
 const PLAN_SUBCOMMANDS = [
@@ -81,14 +167,17 @@ export default function planMode(pi: ExtensionAPI): void {
         if (isReadOnly() !== willReadOnly) {
             if (willReadOnly) {
                 savedTools = pi.getActiveTools();
-                pi.setActiveTools(savedTools.filter(t => !WRITE_TOOLS.has(t)));
+                pi.setActiveTools(savedTools.filter((t) => !WRITE_TOOLS.has(t)));
             } else {
                 pi.setActiveTools(savedTools ?? pi.getActiveTools());
                 savedTools = undefined;
             }
         }
         state = next;
-        if (next === "off") { steps = []; creating = false; }
+        if (next === "off") {
+            steps = [];
+            creating = false;
+        }
         setPlanStatus(ctx);
         ctx.ui.notify(message ?? (next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]));
         persistState();
@@ -97,7 +186,7 @@ export default function planMode(pi: ExtensionAPI): void {
     /** Accepts the proposed plan and tells the agent to implement it. */
     function accept(ctx: ExtensionContext): void {
         transition(ctx, "implementing");
-        pi.sendUserMessage("The plan is accepted. Begin implementation now.");
+        pi.sendUserMessage("The plan is accepted. Begin implementation now.", { deliverAs: "followUp" });
     }
 
     /**
@@ -161,8 +250,7 @@ export default function planMode(pi: ExtensionAPI): void {
         let inSteps = false;
 
         for (const tok of tokens) {
-            if (tok.type === "heading" && tok.depth <= 3
-                && tok.text.trim().toLowerCase() === "steps") {
+            if (tok.type === "heading" && tok.depth <= 3 && tok.text.trim().toLowerCase() === "steps") {
                 inSteps = true;
                 continue;
             }
@@ -171,8 +259,7 @@ export default function planMode(pi: ExtensionAPI): void {
 
             for (const item of tok.items) {
                 const title = extractBoldTitle(item.text);
-                if (title && title.length > 3)
-                    items.push({ step: items.length + 1, text: title });
+                if (title && title.length > 3) items.push({ step: items.length + 1, text: title });
             }
             break;
         }
@@ -192,21 +279,32 @@ export default function planMode(pi: ExtensionAPI): void {
         for (const candidate of candidates) {
             try {
                 return readFileSync(candidate, "utf8");
-            } catch { /* try the next candidate */ }
+            } catch {
+                /* try the next candidate */
+            }
         }
         return null;
     }
 
     const subcommandHandlers: Record<string, (ctx: ExtensionContext) => void> = {
         create(ctx) {
-            if (state === "off") { ctx.ui.notify("Not in plan mode.", "warning"); return; }
-            if (!isReadOnly()) { ctx.ui.notify("Finish implementing or cycle back to brainstorming first.", "warning"); return; }
+            if (state === "off") {
+                ctx.ui.notify("Not in plan mode.", "warning");
+                return;
+            }
+            if (!isReadOnly()) {
+                ctx.ui.notify("Finish implementing or cycle back to brainstorming first.", "warning");
+                return;
+            }
             creating = true;
-            pi.sendUserMessage("Produce the formal plan now.");
+            pi.sendUserMessage("Produce the formal plan now.", { deliverAs: "followUp" });
             persistState();
         },
         disable: (ctx) => {
-            if (state === "off") { ctx.ui.notify("Not in plan mode.", "warning"); return; }
+            if (state === "off") {
+                ctx.ui.notify("Not in plan mode.", "warning");
+                return;
+            }
             transition(ctx, "off");
         },
     };
@@ -214,7 +312,7 @@ export default function planMode(pi: ExtensionAPI): void {
     pi.registerCommand("plan", {
         description: "Plan mode: enter brainstorming, or run a subcommand (create / disable)",
         getArgumentCompletions: (prefix: string) => {
-            const matches = PLAN_SUBCOMMANDS.filter(s => s.value.startsWith(prefix));
+            const matches = PLAN_SUBCOMMANDS.filter((s) => s.value.startsWith(prefix));
             return matches.length > 0 ? matches : null;
         },
         handler: async (args, ctx) => {
@@ -224,7 +322,10 @@ export default function planMode(pi: ExtensionAPI): void {
                 return;
             }
             const handler = subcommandHandlers[args.trim()];
-            if (!handler) { ctx.ui.notify(`Unknown subcommand: ${args}`, "warning"); return; }
+            if (!handler) {
+                ctx.ui.notify(`Unknown subcommand: ${args}`, "warning");
+                return;
+            }
             handler(ctx);
         },
     });
@@ -283,9 +384,15 @@ export default function planMode(pi: ExtensionAPI): void {
 
         creating = false;
         type Msg = { role?: string; content?: Array<{ type?: string; text?: string }> };
-        const last = (event.messages as Msg[]).findLast(m => m.role === "assistant" && Array.isArray(m.content));
-        if (!last?.content) { persistState(); return; }
-        const text = last.content.filter(b => b.type === "text").map(b => b.text ?? "").join("\n");
+        const last = (event.messages as Msg[]).findLast((m) => m.role === "assistant" && Array.isArray(m.content));
+        if (!last?.content) {
+            persistState();
+            return;
+        }
+        const text = last.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text ?? "")
+            .join("\n");
         const extracted = extractPlanSteps(text);
         if (extracted.length === 0) {
             ctx.ui.notify("No plan steps found — try /plan create again.", "warning");
@@ -304,9 +411,8 @@ export default function planMode(pi: ExtensionAPI): void {
 
     pi.on("session_start", (_event, ctx) => {
         const entries = ctx.sessionManager.getEntries() as Array<{ type: string; customType?: string; data?: unknown }>;
-        const planEntry = entries
-            .filter(e => e.type === "custom" && e.customType === "plan-mode")
-            .pop() as { data?: { state?: PlanState; enabled?: boolean; creating?: boolean; steps?: PlanStep[] } } | undefined;
+        const planEntry = entries.filter((e) => e.type === "custom" && e.customType === "plan-mode").pop() as
+            { data?: { state?: PlanState; enabled?: boolean; creating?: boolean; steps?: PlanStep[] } } | undefined;
 
         if (!planEntry?.data) {
             transition(ctx, "brainstorming");
@@ -314,17 +420,20 @@ export default function planMode(pi: ExtensionAPI): void {
         }
 
         const data = planEntry.data;
-        state = data.state && PLAN_STATES.has(data.state)
-            ? data.state
-            : data.enabled
-                ? (data.steps?.length ? "proposing" : "brainstorming")
-                : "off";
+        state =
+            data.state && PLAN_STATES.has(data.state)
+                ? data.state
+                : data.enabled
+                  ? data.steps?.length
+                      ? "proposing"
+                      : "brainstorming"
+                  : "off";
         creating = data.creating ?? false;
         steps = data.steps ?? [];
 
         if (isReadOnly()) {
             savedTools = pi.getActiveTools();
-            pi.setActiveTools(savedTools.filter(t => !WRITE_TOOLS.has(t)));
+            pi.setActiveTools(savedTools.filter((t) => !WRITE_TOOLS.has(t)));
         }
         setPlanStatus(ctx);
     });
