@@ -13,10 +13,10 @@
   ],
   "scripts": {
     "test": "node --test src/index.test.ts",
-    "typecheck": "tsc",
+    "typecheck": "tsc -p tsconfig.build.json",
     "format": "prettier --write src/",
     "format:check": "prettier --check src/",
-    "lint": "tsc"
+    "lint": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "marked": "^18.0.5",
