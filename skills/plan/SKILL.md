@@ -7,21 +7,22 @@ description: Plan mode — iterative exploration and planning. Read-only.
 
 ## Process
 
-Planning happens in two phases:
+Planning happens in two read-only phases:
 
 ### Phase 1 — Brainstorming
 
 - Read files, search the codebase, run read-only commands
 - Ask clarifying questions before assuming
 - Discuss approaches and trade-offs freely
+- **Do not propose a plan.** When you have enough context, include `[PLAN_READY]`
+  in your response. The user will be prompted to confirm before moving to planning.
+- The user can also run `/plan create` as a manual override.
 
-The user will run `/plan create` when ready for a formal plan.
+### Phase 2 — Planning
 
-### Phase 2 — Proposing
-
-Produce a structured plan in the format below. Be concrete and complete.
-The extension will then prompt the user to accept the plan (start
-implementing) or go back to brainstorming — do not tell them to run a command.
+- Produce a structured plan in the format below. Be concrete and complete.
+- The extension will prompt the user to accept the plan (start implementing)
+  or go back to brainstorming — do not tell them to run a command.
 
 ## Plan format
 
@@ -36,9 +37,9 @@ Every file that will be touched:
 Numbered, each scoped to one concern:
 
 1. **Title** — what and why
-   ```lang
-   // before / after snippet showing the key change
-   ```
+    ```lang
+    // before / after snippet showing the key change
+    ```
 
 ## On-demand skills
 

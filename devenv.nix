@@ -16,8 +16,9 @@
   git-hooks.hooks = {
     format = {
       enable = true;
-      entry = "pnpm format:check";
+      entry = "pnpm format";
       files = "\\.(ts|json|md)$";
+      package = pkgs.pnpm;
     };
   };
 }

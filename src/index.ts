@@ -119,23 +119,23 @@ interface PlanStep {
     text: string;
 }
 
-type PlanState = "off" | "brainstorming" | "proposing" | "implementing";
+type PlanState = "off" | "brainstorming" | "planning" | "implementing";
 
-const PLAN_STATES: ReadonlySet<string> = new Set(["off", "brainstorming", "proposing", "implementing"]);
-const READ_ONLY_STATES: ReadonlySet<string> = new Set(["brainstorming", "proposing"]);
+const PLAN_STATES = new Set(["off", "brainstorming", "planning", "implementing"]);
+const READ_ONLY_STATES: ReadonlySet<string> = new Set(["brainstorming", "planning"]);
 
 const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
     brainstorming: "plan: brainstorming — read-only, exploring",
-    proposing: "plan: proposing — plan awaiting review",
+    planning: "plan: planning — drafting PRD",
     implementing: "plan: implementing — write tools enabled",
 };
 
 /**
  * Plan mode extension for pi coding agent.
  *
- * States: off → brainstorming (read-only) → proposing (read-only, plan
- * awaiting review) → implementing (write tools) → auto-return to brainstorming.
- * Shift+Tab cycles; the agent prompts for plan acceptance after drafting.
+ * States: off → brainstorming (read-only) → planning (read-only, drafting
+ * PRD) → implementing (write tools) → auto-return to brainstorming.
+ * Ctrl+Alt+P cycles; the agent asks before transitioning to planning.
  */
 export default function planMode(pi: ExtensionAPI): void {
     let state: PlanState = "off";
@@ -272,10 +272,10 @@ export default function planMode(pi: ExtensionAPI): void {
      * Returns null if neither exists or cannot be read.
      */
     function loadSkillContent(): string | null {
-        const candidates = [
-            new URL("../skills/plan/SKILL.md", import.meta.url),
-            join(process.env.HOME!, ".pi", "agent", "skills", "plan", "SKILL.md"),
-        ];
+        const candidates: (URL | string)[] = [new URL("../skills/plan/SKILL.md", import.meta.url)];
+        if (process.env.HOME) {
+            candidates.push(join(process.env.HOME, ".pi", "agent", "skills", "plan", "SKILL.md"));
+        }
         for (const candidate of candidates) {
             try {
                 return readFileSync(candidate, "utf8");
@@ -297,7 +297,8 @@ export default function planMode(pi: ExtensionAPI): void {
                 return;
             }
             creating = true;
-            pi.sendUserMessage("Produce the formal plan now.", { deliverAs: "followUp" });
+            transition(ctx, "planning");
+            pi.sendUserMessage("Produce the formal PRD now.", { deliverAs: "followUp" });
             persistState();
         },
         disable: (ctx) => {
@@ -342,9 +343,9 @@ export default function planMode(pi: ExtensionAPI): void {
                         ctx.ui.notify("No plan proposed yet — run /plan create.", "warning");
                         return;
                     }
-                    transition(ctx, "proposing");
+                    transition(ctx, "planning");
                     break;
-                case "proposing":
+                case "planning":
                     accept(ctx);
                     break;
                 case "implementing":
@@ -366,33 +367,56 @@ export default function planMode(pi: ExtensionAPI): void {
     });
 
     pi.on("before_agent_start", () => {
-        if (!creating) return;
+        if (!isReadOnly()) return;
         const content = skillContent ?? loadSkillContent();
         if (!content) return;
         skillContent = content;
         return { message: { customType: "plan-context", content, display: false } };
     });
 
+    /** Extracts the concatenated text from the last assistant message. */
+    function lastAssistantText(
+        messages: Array<{ role?: string; content?: Array<{ type?: string; text?: string }> }>,
+    ): string {
+        const last = messages.findLast((m) => m.role === "assistant" && Array.isArray(m.content));
+        if (!last?.content) return "";
+        return last.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text ?? "")
+            .join("\n");
+    }
+
     pi.on("agent_end", async (event, ctx) => {
         if (state === "off" || !ctx.hasUI) return;
 
         if (!creating) {
+            if (state === "brainstorming") {
+                const text = lastAssistantText(
+                    event.messages as Array<{ role?: string; content?: Array<{ type?: string; text?: string }> }>,
+                );
+                if (text.includes("[PLAN_READY]")) {
+                    const answer = await ctx.ui.select("Move to planning?", ["Yes", "Not yet"]);
+                    if (answer === "Yes") {
+                        creating = true;
+                        transition(ctx, "planning");
+                        pi.sendUserMessage("Produce the formal PRD now.", { deliverAs: "followUp" });
+                        persistState();
+                    }
+                }
+            }
             if (state === "implementing")
                 transition(ctx, "brainstorming", "Back to brainstorming — Ctrl+Alt+P ×2 resumes implementing.");
             return;
         }
 
         creating = false;
-        type Msg = { role?: string; content?: Array<{ type?: string; text?: string }> };
-        const last = (event.messages as Msg[]).findLast((m) => m.role === "assistant" && Array.isArray(m.content));
-        if (!last?.content) {
+        const text = lastAssistantText(
+            event.messages as Array<{ role?: string; content?: Array<{ type?: string; text?: string }> }>,
+        );
+        if (!text) {
             persistState();
             return;
         }
-        const text = last.content
-            .filter((b) => b.type === "text")
-            .map((b) => b.text ?? "")
-            .join("\n");
         const extracted = extractPlanSteps(text);
         if (extracted.length === 0) {
             ctx.ui.notify("No plan steps found — try /plan create again.", "warning");
@@ -402,11 +426,11 @@ export default function planMode(pi: ExtensionAPI): void {
 
         steps = extracted;
         persistState();
-        transition(ctx, "proposing");
+        transition(ctx, "planning");
         const choice = await ctx.ui.select("Plan proposed — accept?", [...DIALOG_OPTIONS]);
         if (choice === "Implement now") accept(ctx);
         else if (choice === "Back to brainstorming") transition(ctx, "brainstorming");
-        else ctx.ui.notify("Still proposing — Ctrl+Alt+P to accept, /plan disable to exit.");
+        else ctx.ui.notify("Still in planning — Ctrl+Alt+P to accept, /plan disable to exit.");
     });
 
     pi.on("session_start", (_event, ctx) => {
@@ -425,7 +449,7 @@ export default function planMode(pi: ExtensionAPI): void {
                 ? data.state
                 : data.enabled
                   ? data.steps?.length
-                      ? "proposing"
+                      ? "planning"
                       : "brainstorming"
                   : "off";
         creating = data.creating ?? false;
