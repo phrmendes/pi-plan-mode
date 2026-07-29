@@ -29,13 +29,11 @@ interface HarnessOpts {
 
 /**
  * Drives the real extension through a stubbed pi/ctx.
- * `selectChoice` is the canned approval-dialog answer; undefined simulates Esc.
+ * `selectChoices` is the canned approval-dialog answer; undefined simulates Esc.
  */
 function createHarness(opts: HarnessOpts = {}) {
     const events = new Map<string, (...args: any[]) => any>();
     const commands = new Map<string, { handler: (args: string, ctx: any) => any }>();
-    let shortcutKey: string | undefined;
-    let shortcutHandler: ((ctx: any) => any) | undefined;
     let activeTools = opts.tools ?? [...FULL_TOOLS];
     const appended: Array<{ state?: string; creating?: boolean; steps?: unknown[] }> = [];
     const sent: string[] = [];
@@ -47,10 +45,6 @@ function createHarness(opts: HarnessOpts = {}) {
 
     const pi = {
         registerCommand: (name: string, def: any) => void commands.set(name, def),
-        registerShortcut: (key: string, def: any) => {
-            shortcutKey = key;
-            shortcutHandler = def.handler;
-        },
         on: (event: string, fn: any) => void events.set(event, fn),
         appendEntry: (_type: string, data: any) => void appended.push(data),
         sendUserMessage: (msg: string, opts?: { deliverAs?: string }) => void (sent.push(msg), sentOpts.push(opts)),
@@ -83,7 +77,6 @@ function createHarness(opts: HarnessOpts = {}) {
         notes,
         appended,
         start: () => events.get("session_start")!({}, ctx),
-        cycle: () => shortcutHandler!(ctx),
         command: (args: string) => commands.get("plan")!.handler(args, ctx),
         agentEnd: (messages: unknown[] = []) => events.get("agent_end")!({ messages }, ctx),
         beforeAgentStart: () => {
@@ -108,9 +101,6 @@ function createHarness(opts: HarnessOpts = {}) {
         get planStatuses() {
             return statuses.filter((s) => s?.startsWith("plan: "));
         },
-        get shortcutKey() {
-            return shortcutKey;
-        },
         get selectCalls() {
             return selectCalls;
         },
@@ -124,26 +114,6 @@ test("fresh session starts in brainstorming with write tools disabled", () => {
     assert.equal(h.status, "plan: brainstorming");
     assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
     assert.equal(h.appended.at(-1)?.state, "brainstorming");
-});
-
-test("cycle shortcut is ctrl+alt+p", () => {
-    const h = createHarness();
-    assert.equal(h.shortcutKey, "ctrl+alt+p");
-});
-
-test("cycle: off → brainstorming, guarded without steps", () => {
-    const h = createHarness({ entries: [entry({ state: "off", steps: [] })] });
-    h.start();
-    assert.equal(h.status, undefined);
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
-
-    h.cycle();
-    assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
-
-    h.cycle();
-    assert.equal(h.status, "plan: brainstorming");
-    assert.match(h.lastNote(), /no plan/i);
 });
 
 test("create flow: draft → planning → accept → implementing → auto-return", async () => {
@@ -169,20 +139,6 @@ test("create flow: draft → planning → accept → implementing → auto-retur
     assert.ok((h.appended.at(-1)?.steps ?? []).length > 0);
 });
 
-test("resume: brainstorming with steps cycles to planning, then implementing", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    await h.endTurn();
-
-    h.cycle();
-    assert.equal(h.status, "plan: planning");
-    h.cycle();
-    assert.equal(h.status, "plan: implementing");
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
-});
-
 test("dialog reject → back to brainstorming, still read-only", async () => {
     const h = createHarness({ selectChoices: ["Back to brainstorming"] });
     h.start();
@@ -193,17 +149,13 @@ test("dialog reject → back to brainstorming, still read-only", async () => {
     assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
 });
 
-test("dialog dismissed → stays planning; shift+tab accepts", async () => {
+test("dialog dismissed → stays planning", async () => {
     const h = createHarness({ selectChoices: [undefined] });
     h.start();
     h.command("create");
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.status, "plan: planning");
     assert.equal(h.sent.length, 1);
-
-    h.cycle();
-    assert.equal(h.status, "plan: implementing");
-    assert.equal(h.sent.at(-1), "The plan is accepted. Begin implementation now.");
 });
 
 test("failed extraction keeps planning and warns", async () => {
@@ -270,7 +222,7 @@ test("auto-return notifies exactly once", async () => {
     const before = h.notes.length;
     await h.endTurn();
     assert.equal(h.notes.length - before, 1);
-    assert.match(h.lastNote(), /ctrl\+alt\+p/i);
+    assert.match(h.lastNote(), /brainstorming/i);
 });
 
 test("re-draft followed by dismiss persists the new steps", async () => {
@@ -289,13 +241,13 @@ test("re-draft followed by dismiss persists the new steps", async () => {
     ]);
 });
 
-test("before_agent_start injects the bundled skill during read-only states", () => {
+test("before_agent_start injects the per-state skill file", () => {
     const h = createHarness();
     h.start();
 
     const result = h.beforeAgentStart();
     assert.equal(result?.message?.customType, "plan-context");
-    assert.match(result?.message?.content ?? "", /# Plan Mode/);
+    assert.match(result?.message?.content ?? "", /# Brainstorming/);
 });
 
 test("before_agent_start does not inject skill in off state", () => {
@@ -312,61 +264,4 @@ test("create is rejected outside read-only states", () => {
     h.command("create");
     assert.equal(h.sent.length, 0);
     assert.match(h.lastNote(), /not in plan mode/i);
-});
-
-test("agent PLAN_READY marker → yes transitions to planning", async () => {
-    const h = createHarness({ selectChoices: ["Yes"] });
-    h.start();
-
-    await h.agentEnd([assistantMsg("I think we have enough context. [PLAN_READY]")]);
-    assert.equal(h.status, "plan: planning");
-    assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
-    assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
-    assert.equal(h.selectCalls, 1);
-});
-
-test("agent PLAN_READY marker → not yet stays brainstorming", async () => {
-    const h = createHarness({ selectChoices: ["Not yet"] });
-    h.start();
-
-    await h.agentEnd([assistantMsg("Ready to go! [PLAN_READY]")]);
-    assert.equal(h.status, "plan: brainstorming");
-    assert.equal(h.sent.length, 0);
-    assert.equal(h.selectCalls, 1);
-});
-
-test("agent PLAN_READY marker → dismissed stays brainstorming", async () => {
-    const h = createHarness({ selectChoices: [undefined] });
-    h.start();
-
-    await h.agentEnd([assistantMsg("[PLAN_READY]")]);
-    assert.equal(h.status, "plan: brainstorming");
-    assert.equal(h.sent.length, 0);
-    assert.equal(h.selectCalls, 1);
-});
-
-test("PLAN_READY followed by full accept flow: yes → draft → implement", async () => {
-    const h = createHarness({ selectChoices: ["Yes", "Implement now"] });
-    h.start();
-
-    await h.agentEnd([assistantMsg("Looks good. [PLAN_READY]")]);
-    assert.equal(h.status, "plan: planning");
-    assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
-    assert.equal(h.selectCalls, 1);
-
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.selectCalls, 2);
-    assert.equal(h.status, "plan: implementing");
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
-    assert.equal(h.sent.at(-1), "The plan is accepted. Begin implementation now.");
-});
-
-test("PLAN_READY ignored when creating already", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-
-    await h.agentEnd([assistantMsg("[PLAN_READY] but this is a plan draft\n\n### Steps\n\n1. **Step one** — first")]);
-    assert.equal(h.status, "plan: implementing");
-    assert.equal(h.selectCalls, 1);
 });

@@ -5,6 +5,7 @@
     "module": "nodenext",
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true
   },
   "include": ["src"]
