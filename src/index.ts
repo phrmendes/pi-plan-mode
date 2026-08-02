@@ -162,7 +162,7 @@ export default function planMode(pi: ExtensionAPI): void {
         let inSteps = false;
 
         for (const tok of tokens) {
-            if (tok.type === "heading" && tok.depth <= 3 && tok.text.trim().toLowerCase() === "steps") {
+            if (tok.type === "heading" && tok.depth <= 3 && tok.text.trim().toLowerCase().includes("steps")) {
                 inSteps = true;
                 continue;
             }

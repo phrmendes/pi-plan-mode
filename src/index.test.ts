@@ -182,6 +182,26 @@ test("failed extraction keeps planning and warns", async () => {
     assert.match(h.lastNote(), /no plan steps/i);
 });
 
+test("extraction matches heading substrings like ## Implementation Steps", async () => {
+    const h = createHarness({ selectChoices: ["Implement now"] });
+    h.start();
+    h.command("create");
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg("## Implementation Steps\n\n1. **Do X** — because\n2. **Do Y** — also")]);
+    assert.equal(h.selectCalls, 1);
+    assert.equal(h.status, "plan: implementing");
+});
+
+test("extraction handles files section before steps", async () => {
+    const h = createHarness({ selectChoices: ["Implement now"] });
+    h.start();
+    h.command("create");
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg("### Files\n\n- `src/a.ts` — entry\n\n### Steps\n\n1. **Refactor** — cleanup")]);
+    assert.equal(h.selectCalls, 1);
+    assert.equal(h.status, "plan: implementing");
+});
+
 test("disable exits plan mode, restores tools, clears steps", async () => {
     const h = createHarness({ selectChoices: ["Implement now"] });
     h.start();
