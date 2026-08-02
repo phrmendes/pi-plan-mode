@@ -9,6 +9,7 @@ const BLOCK_OPS = new Set(["&", "<&", "<(", ">", ">>"]);
 const CHAIN_OPS = new Set(["|", "||", "&&", ";"]);
 const DIALOG_OPTIONS = ["Implement now", "Back to brainstorming"] as const;
 const SAFE_SUBCOMMANDS: Record<string, string[]> = tools.safeSubcommands;
+const SAFE_SUBCOMMAND_GROUPS: Record<string, Record<string, string[]>> = tools.safeSubcommandGroups ?? {};
 const SAFE_TOOLS = new Set(tools.safeCommands);
 const WRITE_TOOLS = new Set(["edit", "write"]);
 
@@ -43,6 +44,7 @@ const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
 export default function planMode(pi: ExtensionAPI): void {
     let state: PlanState = "off";
     let creating = false;
+    let pendingPlanRequest = false;
     let steps: PlanStep[] = [];
     let savedTools: string[] | undefined;
     let skillCache = new Map<string, string>();
@@ -80,6 +82,7 @@ export default function planMode(pi: ExtensionAPI): void {
         if (next === "off") {
             steps = [];
             creating = false;
+            pendingPlanRequest = false;
         }
         setPlanStatus(ctx);
         ctx.ui.notify(message ?? (next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]));
@@ -97,11 +100,17 @@ export default function planMode(pi: ExtensionAPI): void {
      * subcommand of a restricted tool (e.g. `git status`).
      */
     function isCommandSafe(words: string[]): boolean {
-        const [cmd, sub] = words;
+        const [cmd, sub, sub2] = words;
         if (!cmd) return false;
         if (SAFE_TOOLS.has(cmd)) return true;
         const allowed = SAFE_SUBCOMMANDS[cmd];
-        return allowed != null && sub != null && allowed.includes(sub);
+        if (allowed != null && sub != null && allowed.includes(sub)) return true;
+        const groups = SAFE_SUBCOMMAND_GROUPS[cmd];
+        if (groups != null && sub != null) {
+            const inner = groups[sub];
+            if (inner != null) return sub2 == null || inner.includes(sub2);
+        }
+        return false;
     }
 
     /**
@@ -110,7 +119,7 @@ export default function planMode(pi: ExtensionAPI): void {
      * and checks each segment independently.
      */
     function isSafe(command: string): boolean {
-        if (command.includes("`")) return false;
+        if (command.includes("`") || command.includes("$(")) return false;
         const tokens = parseShell(command);
         const segments: string[][] = [[]];
         for (let i = 0; i < tokens.length; i++) {
@@ -199,7 +208,7 @@ export default function planMode(pi: ExtensionAPI): void {
                 ctx.ui.notify("Wait for the current turn to end first.", "warning");
                 return;
             }
-            creating = true;
+            pendingPlanRequest = true;
             transition(ctx, "planning");
             pi.sendUserMessage("Produce the formal PRD now.", { deliverAs: "followUp" });
         },
@@ -245,6 +254,11 @@ export default function planMode(pi: ExtensionAPI): void {
     });
 
     pi.on("before_agent_start", () => {
+        if (pendingPlanRequest) {
+            creating = true;
+            pendingPlanRequest = false;
+            persistState();
+        }
         const content = skillCache.get(state) ?? loadSkillContent(state);
         if (!content) return;
         skillCache.set(state, content);
@@ -302,10 +316,10 @@ export default function planMode(pi: ExtensionAPI): void {
             data.state && PLAN_STATES.has(data.state)
                 ? data.state
                 : data.enabled
-                    ? data.steps?.length
-                        ? "planning"
-                        : "brainstorming"
-                    : "off";
+                  ? data.steps?.length
+                      ? "planning"
+                      : "brainstorming"
+                  : "off";
         creating = data.creating ?? false;
         steps = data.steps ?? [];
 

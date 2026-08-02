@@ -25,6 +25,8 @@ interface HarnessOpts {
     entries?: Entry[];
     tools?: string[];
     selectChoices?: (string | undefined)[];
+    /** When true, sendUserMessage with followUp queues instead of starting a turn directly. */
+    streaming?: boolean;
 }
 
 /**
@@ -42,12 +44,20 @@ function createHarness(opts: HarnessOpts = {}) {
     let status: string | undefined;
     const statuses: Array<string | undefined> = [];
     let selectCalls = 0;
+    const streaming = opts.streaming ?? false;
+    const followUpQueue: Array<{ msg: string; opts?: { deliverAs?: string } }> = [];
 
     const pi = {
         registerCommand: (name: string, def: any) => void commands.set(name, def),
         on: (event: string, fn: any) => void events.set(event, fn),
         appendEntry: (_type: string, data: any) => void appended.push(data),
-        sendUserMessage: (msg: string, opts?: { deliverAs?: string }) => void (sent.push(msg), sentOpts.push(opts)),
+        sendUserMessage: (msg: string, opts?: { deliverAs?: string }) => {
+            sent.push(msg);
+            sentOpts.push(opts);
+            if (streaming && opts?.deliverAs === "followUp") {
+                followUpQueue.push({ msg, opts });
+            }
+        },
         getActiveTools: () => [...activeTools],
         setActiveTools: (tools: string[]) => {
             activeTools = [...tools];
@@ -124,6 +134,7 @@ test("create flow: draft → planning → accept → implementing → auto-retur
     assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
     assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
 
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.selectCalls, 1);
     assert.deepEqual(h.planStatuses, ["plan: brainstorming", "plan: planning", "plan: implementing"]);
@@ -143,6 +154,7 @@ test("dialog reject → back to brainstorming, still read-only", async () => {
     const h = createHarness({ selectChoices: ["Back to brainstorming"] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.status, "plan: brainstorming");
     assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
@@ -153,6 +165,7 @@ test("dialog dismissed → stays planning", async () => {
     const h = createHarness({ selectChoices: [undefined] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.status, "plan: planning");
     assert.equal(h.sent.length, 1);
@@ -162,6 +175,7 @@ test("failed extraction keeps planning and warns", async () => {
     const h = createHarness({ selectChoices: ["Implement now"] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg("no plan here")]);
     assert.equal(h.status, "plan: planning");
     assert.equal(h.selectCalls, 0);
@@ -172,6 +186,7 @@ test("disable exits plan mode, restores tools, clears steps", async () => {
     const h = createHarness({ selectChoices: ["Implement now"] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     await h.endTurn();
 
@@ -207,6 +222,19 @@ test("tool_call blocked in read-only states, free in implementing", () => {
     readOnly.start();
     assert.equal(readOnly.toolCall("bash", "rm -rf /")?.block, true);
     assert.equal(readOnly.toolCall("bash", "git status"), undefined);
+    assert.equal(readOnly.toolCall("bash", "echo $(cat /etc/passwd)")?.block, true);
+    assert.equal(readOnly.toolCall("bash", 'echo "$(whoami)"')?.block, true);
+    // added commands
+    assert.equal(readOnly.toolCall("bash", "awk '{print \$1}'"), undefined);
+    assert.equal(readOnly.toolCall("bash", "git blame src/index.ts"), undefined);
+    assert.equal(readOnly.toolCall("bash", "npm ls"), undefined);
+    assert.equal(readOnly.toolCall("bash", "pnpm outdated"), undefined);
+    assert.equal(readOnly.toolCall("bash", "mix deps"), undefined);
+    // 3-level gating
+    assert.equal(readOnly.toolCall("bash", "uv pip list"), undefined);
+    assert.equal(readOnly.toolCall("bash", "uv pip install requests")?.block, true);
+    // removed from safeCommands
+    assert.equal(readOnly.toolCall("bash", "xargs rm")?.block, true);
 
     const implementing = createHarness({ entries: [entry({ state: "implementing", steps: [] })] });
     implementing.start();
@@ -217,6 +245,7 @@ test("auto-return notifies exactly once", async () => {
     const h = createHarness({ selectChoices: ["Implement now"] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
 
     const before = h.notes.length;
@@ -230,9 +259,11 @@ test("re-draft followed by dismiss persists the new steps", async () => {
     const h = createHarness({ selectChoices: [undefined, undefined] });
     h.start();
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(PLAN_MD)]);
 
     h.command("create");
+    h.beforeAgentStart();
     await h.agentEnd([assistantMsg(REVISED_MD)]);
 
     assert.deepEqual(h.appended.at(-1)?.steps, [
@@ -256,6 +287,27 @@ test("before_agent_start does not inject skill in off state", () => {
 
     const result = h.beforeAgentStart();
     assert.equal(result, undefined);
+});
+
+test("create during streaming turn does not trigger dialog from wrong turn", async () => {
+    const h = createHarness({ selectChoices: ["Implement now"], streaming: true });
+    h.start();
+
+    // agent is mid-turn (brainstorming) when /plan create runs
+    h.command("create");
+    assert.equal(h.sent.length, 1);
+
+    // current brainstorming turn ends — should NOT trigger plan dialog
+    await h.agentEnd([assistantMsg("Just exploring the codebase...")]);
+    assert.equal(h.selectCalls, 0, "dialog should not fire after the in-progress turn");
+    assert.equal(h.status, "plan: planning");
+
+    // followUp is delivered by pi, new turn starts
+    h.beforeAgentStart();
+    // plan turn ends — SHOULD trigger dialog
+    await h.agentEnd([assistantMsg(PLAN_MD)]);
+    assert.equal(h.selectCalls, 1, "dialog should fire after the plan turn");
+    assert.equal(h.status, "plan: implementing");
 });
 
 test("create is rejected outside read-only states", () => {
