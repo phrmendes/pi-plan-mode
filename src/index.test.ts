@@ -37,7 +37,12 @@ function createHarness(opts: HarnessOpts = {}) {
     const events = new Map<string, (...args: any[]) => any>();
     const commands = new Map<string, { handler: (args: string, ctx: any) => any }>();
     let activeTools = opts.tools ?? [...FULL_TOOLS];
-    const appended: Array<{ state?: string; creating?: boolean; steps?: unknown[] }> = [];
+    const appended: Array<{
+        state?: string;
+        planTurnActive?: boolean;
+        pendingPlanRequest?: number;
+        steps?: unknown[];
+    }> = [];
     const sent: string[] = [];
     const sentOpts: Array<{ deliverAs?: string } | undefined> = [];
     const notes: string[] = [];
@@ -171,15 +176,25 @@ test("dialog dismissed → stays planning", async () => {
     assert.equal(h.sent.length, 1);
 });
 
-test("failed extraction keeps planning and warns", async () => {
+test("failed extraction warns but still shows dialog", async () => {
+    const h = createHarness({ selectChoices: ["Back to brainstorming"] });
+    h.start();
+    h.command("create");
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg("no plan here")]);
+    assert.match(h.notes.join(" "), /no steps extracted/i);
+    assert.equal(h.selectCalls, 1, "dialog must always appear");
+    assert.equal(h.status, "plan: brainstorming");
+});
+
+test("failed extraction with accept transitions to implementing", async () => {
     const h = createHarness({ selectChoices: ["Implement now"] });
     h.start();
     h.command("create");
     h.beforeAgentStart();
     await h.agentEnd([assistantMsg("no plan here")]);
-    assert.equal(h.status, "plan: planning");
-    assert.equal(h.selectCalls, 0);
-    assert.match(h.lastNote(), /no plan steps/i);
+    assert.equal(h.selectCalls, 1);
+    assert.equal(h.status, "plan: implementing");
 });
 
 test("extraction matches heading substrings like ## Implementation Steps", async () => {
@@ -245,7 +260,11 @@ test("tool_call blocked in read-only states, free in implementing", () => {
     assert.equal(readOnly.toolCall("bash", "echo $(cat /etc/passwd)")?.block, true);
     assert.equal(readOnly.toolCall("bash", 'echo "$(whoami)"')?.block, true);
     // added commands
-    assert.equal(readOnly.toolCall("bash", "awk '{print \$1}'"), undefined);
+    assert.equal(readOnly.toolCall("bash", "awk '{print \$1}'")?.block, true);
+    assert.equal(readOnly.toolCall("bash", "env rm -rf /")?.block, true);
+    assert.equal(readOnly.toolCall("bash", "find . -exec cat {} \\;")?.block, true);
+    assert.equal(readOnly.toolCall("bash", "find . -execdir ls {} \\;")?.block, true);
+    assert.equal(readOnly.toolCall("bash", "printenv"), undefined);
     assert.equal(readOnly.toolCall("bash", "git blame src/index.ts"), undefined);
     assert.equal(readOnly.toolCall("bash", "npm ls"), undefined);
     assert.equal(readOnly.toolCall("bash", "pnpm outdated"), undefined);
@@ -255,6 +274,7 @@ test("tool_call blocked in read-only states, free in implementing", () => {
     assert.equal(readOnly.toolCall("bash", "uv pip install requests")?.block, true);
     // removed from safeCommands
     assert.equal(readOnly.toolCall("bash", "xargs rm")?.block, true);
+    assert.equal(readOnly.toolCall("bash", "sed s/foo/bar/ file")?.block, true);
 
     const implementing = createHarness({ entries: [entry({ state: "implementing", steps: [] })] });
     implementing.start();
@@ -309,6 +329,41 @@ test("before_agent_start does not inject skill in off state", () => {
     assert.equal(result, undefined);
 });
 
+test("before_agent_start injects plan steps into implementing skill", () => {
+    const h = createHarness({
+        entries: [
+            entry({
+                state: "implementing",
+                steps: [
+                    { step: 1, text: "Add login" },
+                    { step: 2, text: "Wire DB" },
+                ],
+            }),
+        ],
+    });
+    h.start();
+    const result = h.beforeAgentStart();
+    assert.ok(result?.message?.content?.includes("Add login"), "steps injected into skill");
+    assert.ok(result?.message?.content?.includes("Wire DB"));
+});
+
+test("brainstorming guardrail warns when agent proposes plan unprompted", async () => {
+    const h = createHarness();
+    h.start();
+    const sentBefore = h.sent.length;
+    await h.agentEnd([assistantMsg(PLAN_MD)]);
+    assert.match(h.lastNote(), /unprompted/i);
+    assert.equal(h.sent.length, sentBefore, "no followUp sent — zero token cost");
+});
+
+test("brainstorming guardrail is silent when response has no plan", async () => {
+    const h = createHarness();
+    h.start();
+    const notesBefore = h.notes.length;
+    await h.agentEnd([assistantMsg("Just exploring the codebase, found some issues.")]);
+    assert.equal(h.notes.length, notesBefore);
+});
+
 test("create during streaming turn does not trigger dialog from wrong turn", async () => {
     const h = createHarness({ selectChoices: ["Implement now"], streaming: true });
     h.start();
@@ -328,6 +383,48 @@ test("create during streaming turn does not trigger dialog from wrong turn", asy
     await h.agentEnd([assistantMsg(PLAN_MD)]);
     assert.equal(h.selectCalls, 1, "dialog should fire after the plan turn");
     assert.equal(h.status, "plan: implementing");
+});
+
+test("double create surfaces both plan dialogs", async () => {
+    const h = createHarness({ selectChoices: ["Implement now", "Implement now"], streaming: true });
+    h.start();
+
+    // spam create twice during a streaming turn
+    h.command("create");
+    h.command("create");
+    assert.equal(h.sent.length, 2);
+
+    // in-progress turn ends — no dialog
+    await h.agentEnd([assistantMsg("Exploring...")]);
+    assert.equal(h.selectCalls, 0);
+
+    // first followUp turn
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg(PLAN_MD)]);
+    assert.equal(h.selectCalls, 1, "first plan should show dialog");
+
+    // second followUp turn
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg("### Steps\n\n1. **Revised** — better")]);
+    assert.equal(h.selectCalls, 2, "second plan should show dialog");
+});
+
+test("extraction accepts short titles and em-dash separators", async () => {
+    const h = createHarness({ selectChoices: ["Implement now"] });
+    h.start();
+    h.command("create");
+    h.beforeAgentStart();
+    await h.agentEnd([assistantMsg("### Steps\n\n1. **Go** — runs\n2. **Fix** — corrects\n3. **Refactor** — cleans")]);
+    assert.equal(h.selectCalls, 1);
+    assert.equal(h.status, "plan: implementing");
+
+    // restart for em-dash test
+    const h2 = createHarness({ selectChoices: ["Implement now"] });
+    h2.start();
+    h2.command("create");
+    h2.beforeAgentStart();
+    await h2.agentEnd([assistantMsg("### Steps\n\n1. **Add login** — add auth\n2. **Wire DB** -- connect")]);
+    assert.equal(h2.selectCalls, 1);
 });
 
 test("create is rejected outside read-only states", () => {
