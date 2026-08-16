@@ -16,9 +16,11 @@ stateDiagram-v2
 The agent normally advances the workflow through typed control tools:
 
 - `plan_propose` enters planning after the user requests a proposal.
-- `plan_submit` sends structured files and work items for approval.
+- `plan_submit` sends a full PRD (problem, goals, requirements, files, steps, success criteria) for approval.
 - `plan_approve` reopens approval for a stored proposal without resubmission.
 - `plan_complete` ends implementation after all work is verified.
+
+Choosing "Implement now" transitions to implementing and immediately queues a follow-up turn, so the agent starts work without waiting for another user message.
 
 Implementation remains active across retries and user turns. Approval applies to the accepted proposal, not only one agent run. `plan_complete` must run separately after all implementation and verification tools finish.
 
@@ -47,7 +49,7 @@ The allowlist is a fixed list of command and subcommand names, not a general scr
 
 ## State and prompts
 
-The current phase, structured proposal, and original tool snapshot persist on the active session branch. Invalid persisted data is normalized during startup.
+The current phase, PRD proposal, and original tool snapshot persist on the active session branch. Invalid persisted data is normalized during startup.
 
 Phase instructions are compact, turn-local system-prompt additions. They are not stored as conversation messages or discoverable pi skills.
 

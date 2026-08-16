@@ -4,7 +4,12 @@ export const PLAN_STATES = ["off", "brainstorming", "planning", "implementing"] 
 export type PlanState = (typeof PLAN_STATES)[number];
 
 export const PLAN_PROPOSAL_SCHEMA = Type.Object({
+    title: Type.String({ minLength: 1 }),
     summary: Type.String({ minLength: 1 }),
+    problem: Type.String({ minLength: 1 }),
+    goals: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+    nonGoals: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    requirements: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
     files: Type.Array(
         Type.Object({
             path: Type.String({ minLength: 1 }),
@@ -18,6 +23,8 @@ export const PLAN_PROPOSAL_SCHEMA = Type.Object({
         }),
         { minItems: 1 },
     ),
+    risks: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    successCriteria: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
 });
 export type PlanProposal = Static<typeof PLAN_PROPOSAL_SCHEMA>;
 
@@ -40,12 +47,46 @@ function text(value: unknown): string | undefined {
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+/** Returns a non-empty array of trimmed strings, or undefined when any item is invalid. */
+function textArray(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const items = value.map((item) => text(item));
+    return items.some((item) => item === undefined) ? undefined : (items as string[]);
+}
+
+/** Returns a possibly empty array of trimmed strings for an optional field. */
+function optionalTextArray(value: unknown): string[] | undefined {
+    if (value === undefined) return undefined;
+    return textArray(value);
+}
+
 /** Normalizes a current structured proposal. */
 function normalizeProposal(value: unknown): PlanProposal | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const raw = value as Record<string, unknown>;
+    const title = text(raw.title);
     const summary = text(raw.summary);
-    if (!summary || !Array.isArray(raw.files) || !Array.isArray(raw.steps) || raw.steps.length === 0) return undefined;
+    const problem = text(raw.problem);
+    const goals = textArray(raw.goals);
+    const requirements = textArray(raw.requirements);
+    const successCriteria = textArray(raw.successCriteria);
+    if (
+        !title ||
+        !summary ||
+        !problem ||
+        !goals ||
+        goals.length === 0 ||
+        !requirements ||
+        requirements.length === 0 ||
+        !successCriteria ||
+        successCriteria.length === 0 ||
+        !Array.isArray(raw.files) ||
+        !Array.isArray(raw.steps) ||
+        raw.steps.length === 0
+    )
+        return undefined;
+    const nonGoals = optionalTextArray(raw.nonGoals);
+    const risks = optionalTextArray(raw.risks);
     const files = raw.files.map((item) => {
         if (typeof item !== "object" || item === null) return undefined;
         const path = text((item as Record<string, unknown>).path);
@@ -60,9 +101,16 @@ function normalizeProposal(value: unknown): PlanProposal | undefined {
     });
     if (files.some((item) => !item) || steps.some((item) => !item)) return undefined;
     return {
+        title,
         summary,
+        problem,
+        goals,
+        ...(nonGoals ? { nonGoals } : {}),
+        requirements,
         files: files as PlanProposal["files"],
         steps: steps as PlanProposal["steps"],
+        ...(risks ? { risks } : {}),
+        successCriteria,
     };
 }
 
@@ -75,7 +123,18 @@ function normalizeLegacyProposal(value: unknown): PlanProposal | undefined {
         )
         .filter((title): title is string => title !== undefined)
         .map((title) => ({ title, description: "" }));
-    return steps.length > 0 ? { summary: "Restored legacy proposal", files: [], steps } : undefined;
+    return steps.length > 0
+        ? {
+              title: "Restored legacy proposal",
+              summary: "Restored legacy proposal",
+              problem: "Restored from a legacy proposal without a recorded problem statement.",
+              goals: ["Restore prior legacy work items"],
+              requirements: steps.map((step) => step.title),
+              files: [],
+              steps,
+              successCriteria: ["All restored steps are completed"],
+          }
+        : undefined;
 }
 
 /** Normalizes current and legacy custom-entry data. */

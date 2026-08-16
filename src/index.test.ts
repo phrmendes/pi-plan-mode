@@ -5,9 +5,14 @@ import { PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanProposal } from "./st
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
+    title: "Improve flow",
     summary: "Improve flow",
+    problem: "The flow is hard to follow",
+    goals: ["Clarify orchestration"],
+    requirements: ["Use control tools"],
     files: [{ path: "src/index.ts", reason: "Change orchestration" }],
     steps: [{ title: "Refactor", description: "Use control tools" }],
+    successCriteria: ["Orchestration reads clearly"],
 };
 
 interface Entry {
@@ -175,15 +180,17 @@ test("plan_submit uses the durable proposal schema", () => {
     assert.equal(h.toolDefinition("plan_submit").parameters, PLAN_PROPOSAL_SCHEMA);
 });
 
-test("implementation prompt uses a compact proposal", () => {
+test("implementation prompt renders the full PRD", () => {
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
     });
     h.start();
     const result = h.beforeAgentStart();
-    assert.match(result.systemPrompt, /Proposed work: Improve flow/);
+    assert.match(result.systemPrompt, /# Improve flow/);
+    assert.match(result.systemPrompt, /## Problem\nThe flow is hard to follow/);
+    assert.match(result.systemPrompt, /## Goals\n- Clarify orchestration/);
     assert.match(result.systemPrompt, /Refactor — Use control tools/);
-    assert.doesNotMatch(result.systemPrompt, /Change orchestration/);
+    assert.match(result.systemPrompt, /Change orchestration/);
 });
 
 test("plan_propose enters planning without a synthetic user message", async () => {
@@ -205,12 +212,20 @@ test("plan_submit approval enters persistent implementation", async () => {
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
 });
 
+test("approving a proposal immediately nudges the agent to implement", async () => {
+    const h = createHarness({ choices: ["Implement now"] });
+    h.start();
+    await h.tool("plan_propose");
+    await h.tool("plan_submit", PROPOSAL);
+    assert.deepEqual(h.sent, ["Begin implementation now."]);
+});
+
 test("plan_submit shows the formatted proposal before the approval prompt", async () => {
     const h = createHarness({ choices: ["Implement now"] });
     h.start();
     await h.tool("plan_propose");
     await h.tool("plan_submit", PROPOSAL);
-    assert.match(h.notes.at(-2) ?? "", /Proposed work: Improve flow/);
+    assert.match(h.notes.at(-2) ?? "", /# Improve flow/);
     assert.match(h.notes.at(-2) ?? "", /Refactor — Use control tools/);
 });
 

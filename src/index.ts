@@ -114,12 +114,29 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         return content;
     }
 
-    /** Formats a proposal for approval recaps and the implementation contract. */
+    /** Renders a bullet list, or omits the section entirely when the list is empty. */
+    function bulletSection(heading: string, items?: string[]): string {
+        if (!items || items.length === 0) return "";
+        return `\n\n## ${heading}\n${items.map((item) => `- ${item}`).join("\n")}`;
+    }
+
+    /** Formats a proposal as a Markdown PRD for approval recaps and the implementation contract. */
     function formatProposal(proposal: PlanProposal): string {
+        const files = proposal.files.map((file) => `- ${file.path} — ${file.reason}`).join("\n");
         const steps = proposal.steps
             .map((step, index) => `${index + 1}. ${step.title} — ${step.description}`)
             .join("\n");
-        return `Proposed work: ${proposal.summary}\n${steps}`;
+        return (
+            `# ${proposal.title}\n\n${proposal.summary}` +
+            `\n\n## Problem\n${proposal.problem}` +
+            bulletSection("Goals", proposal.goals) +
+            bulletSection("Non-Goals", proposal.nonGoals) +
+            bulletSection("Requirements", proposal.requirements) +
+            (files ? `\n\n## Files\n${files}` : "") +
+            `\n\n## Implementation Steps\n${steps}` +
+            bulletSection("Risks", proposal.risks) +
+            bulletSection("Success Criteria", proposal.successCriteria)
+        );
     }
 
     /** Requests approval for the currently stored proposal. */
@@ -135,6 +152,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         const choice = await ctx.ui.select("Plan proposed — accept?", ["Implement now", "Back to brainstorming"]);
         if (choice === "Implement now") {
             transition(ctx, "implementing");
+            pi.sendUserMessage("Begin implementation now.", { deliverAs: "followUp" });
             return {
                 content: [{ type: "text" as const, text: "Proposal approved. Begin implementation." }],
                 details: {},
