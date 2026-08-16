@@ -45,6 +45,7 @@ interface HarnessOptions {
     choices?: (string | undefined)[];
     hasUI?: boolean;
     loadPrompt?: (phase: string) => string | null;
+    rejectStartupActions?: boolean;
 }
 
 function entry(data: unknown): Entry {
@@ -63,6 +64,7 @@ function createHarness(options: HarnessOptions = {}) {
     let status: string | undefined;
     let setActiveToolsCalls = 0;
     let selectCalls = 0;
+    let started = false;
 
     const pi = {
         registerCommand: (name: string, definition: RegisteredCommand) => void commands.set(name, definition),
@@ -70,7 +72,10 @@ function createHarness(options: HarnessOptions = {}) {
         on: (name: string, handler: EventHandler) => void events.set(name, handler),
         appendEntry: (_type: string, value: PlanModeData) => void appended.push(value),
         sendUserMessage: (message: string) => void sent.push(message),
-        getActiveTools: () => [...activeTools],
+        getActiveTools: () => {
+            if (options.rejectStartupActions && !started) throw new Error("Extension runtime not initialized");
+            return [...activeTools];
+        },
         setActiveTools: (names: string[]) => {
             setActiveToolsCalls++;
             activeTools = [...names];
@@ -98,7 +103,10 @@ function createHarness(options: HarnessOptions = {}) {
         appended,
         sent,
         notes,
-        start: () => events.get("session_start")!({}, ctx),
+        start: () => {
+            started = true;
+            return events.get("session_start")!({}, ctx);
+        },
         command: (args = "") => commands.get("plan")!.handler(args, ctx),
         completions: (prefix = "") =>
             commands
@@ -130,6 +138,12 @@ function createHarness(options: HarnessOptions = {}) {
         },
     };
 }
+
+test("extension registration does not call runtime action methods", () => {
+    const h = createHarness({ rejectStartupActions: true });
+    h.start();
+    assert.equal(h.status, "plan: brainstorming");
+});
 
 test("fresh session enters brainstorming with the agent transition tool", () => {
     const h = createHarness();

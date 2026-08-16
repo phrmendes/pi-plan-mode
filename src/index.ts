@@ -51,7 +51,7 @@ export interface PlanModeOptions {
 /** Registers the agent-driven plan workflow. */
 export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
     const baseTools = (): string[] => pi.getActiveTools().filter((tool) => !CONTROL_TOOLS.has(tool));
-    let data: PlanModeData = normalizePlanModeData(undefined, baseTools());
+    let data: PlanModeData = normalizePlanModeData(undefined, []);
     const promptCache = new Map<PlanState, string>();
     const promptFailures = new Set<PlanState>();
     const activeImplementationTools = new Set<string>();
