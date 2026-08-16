@@ -1,266 +1,237 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { parse as parseShell } from "shell-quote";
-import { marked } from "marked";
-import tools from "./tools.json" with { type: "json" };
+import { Type } from "typebox";
+import { isAllowedInspectionCommand } from "./policy.ts";
+import {
+    normalizePlanModeData,
+    PLAN_PROPOSAL_SCHEMA,
+    type PlanModeData,
+    type PlanProposal,
+    type PlanState,
+} from "./state.ts";
 
-const BLOCK_OPS = new Set(["&", "<&", "<(", ">", ">>"]);
-const CHAIN_OPS = new Set(["|", "||", "&&", ";"]);
-const DIALOG_OPTIONS = ["Implement now", "Back to brainstorming"] as const;
-const SAFE_SUBCOMMANDS: Record<string, string[]> = tools.safeSubcommands;
-const SAFE_SUBCOMMAND_GROUPS: Record<string, Record<string, string[]>> = tools.safeSubcommandGroups ?? {};
-const SAFE_TOOLS = new Set(tools.safeCommands);
-const WRITE_TOOLS = new Set(["edit", "write"]);
-
-const PLAN_SUBCOMMANDS = [
-    { value: "create", label: "create — ask the agent to draft the formal plan" },
-    { value: "disable", label: "disable — exit plan mode" },
-];
-
-interface PlanStep {
-    step: number;
-    text: string;
-}
-
-const PLAN_STATES = ["off", "brainstorming", "planning", "implementing"] as const;
-type PlanState = (typeof PLAN_STATES)[number];
-const PLAN_STATES_SET = new Set<string>(PLAN_STATES);
-const READ_ONLY_STATES: ReadonlySet<string> = new Set(["brainstorming", "planning"]);
-
+const CONTROL_TOOLS = new Set(["plan_propose", "plan_submit", "plan_approve", "plan_complete"]);
+const READ_ONLY_TOOLS = new Set(["read", "bash"]);
+const PHASES: Record<
+    PlanState,
+    { readOnly: boolean; controls: string[]; commands: Array<{ value: string; label: string }> }
+> = {
+    off: { readOnly: false, controls: [], commands: [] },
+    brainstorming: {
+        readOnly: true,
+        controls: ["plan_propose"],
+        commands: [
+            { value: "create", label: "create — enter planning" },
+            { value: "disable", label: "disable — exit plan mode" },
+        ],
+    },
+    planning: {
+        readOnly: true,
+        controls: ["plan_submit"],
+        commands: [
+            { value: "bstorm", label: "bstorm — return to brainstorming" },
+            { value: "disable", label: "disable — exit plan mode" },
+        ],
+    },
+    implementing: {
+        readOnly: false,
+        controls: ["plan_complete"],
+        commands: [{ value: "disable", label: "disable — exit plan mode" }],
+    },
+};
 const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
     brainstorming: "plan: brainstorming — read-only, exploring",
-    planning: "plan: planning — drafting PRD",
-    implementing: "plan: implementing — write tools enabled",
+    planning: "plan: planning — read-only, drafting proposal",
+    implementing: "plan: implementing — approved tools enabled",
 };
+export interface PlanModeOptions {
+    loadPrompt?: (phase: PlanState) => string | null;
+}
 
-/**
- * Plan mode extension for pi coding agent.
- *
- * States: off → brainstorming (read-only) → planning (read-only, drafting
- * PRD) → implementing (write tools) → auto-return to brainstorming.
- * Use /plan create to transition to planning.
- */
-export default function planMode(pi: ExtensionAPI): void {
-    let state: PlanState = "off";
-    let planTurnActive = false;
-    let pendingPlanRequest = 0;
-    let steps: PlanStep[] = [];
-    let savedTools: string[] | undefined;
-    const skillCache = new Map<string, string>();
+/** Registers the agent-driven plan workflow. */
+export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
+    const baseTools = (): string[] => pi.getActiveTools().filter((tool) => !CONTROL_TOOLS.has(tool));
+    let data: PlanModeData = normalizePlanModeData(undefined, baseTools());
+    const promptCache = new Map<PlanState, string>();
+    const promptFailures = new Set<PlanState>();
+    const activeImplementationTools = new Set<string>();
 
-    const isReadOnly = (): boolean => READ_ONLY_STATES.has(state);
-
-    /** Writes current plan-mode state to the session entry. */
+    /** Persists the durable workflow state. */
     function persistState(): void {
-        pi.appendEntry("plan-mode", { state, planTurnActive, pendingPlanRequest, steps });
+        pi.appendEntry("plan-mode", data);
     }
 
+    /** Updates the plan status indicator. */
     function setPlanStatus(ctx: ExtensionContext): void {
-        ctx.ui.setStatus("plan", state === "off" ? undefined : `plan: ${state}`);
+        ctx.ui.setStatus("plan", data.phase === "off" ? undefined : `plan: ${data.phase}`);
     }
 
-    /**
-     * Central state transition. Snapshots and filters tools when crossing
-     * into a read-only state, restores them when leaving it. Steps are kept
-     * across the implementing → brainstorming auto-return so work can resume;
-     * they are only cleared on off.
-     */
-    function transition(ctx: ExtensionContext, next: PlanState, message?: string): void {
-        if (state === next) return;
-        const willReadOnly = READ_ONLY_STATES.has(next);
-        if (isReadOnly() !== willReadOnly) {
-            if (willReadOnly) {
-                savedTools = pi.getActiveTools();
-                pi.setActiveTools(savedTools.filter((t) => !WRITE_TOOLS.has(t)));
-            } else {
-                pi.setActiveTools(savedTools ?? pi.getActiveTools());
-                savedTools = undefined;
-            }
-        }
-        state = next;
+    /** Returns the tool set for an enabled phase. */
+    function toolsFor(phase: Exclude<PlanState, "off">): string[] {
+        const config = PHASES[phase];
+        const tools = config.readOnly ? data.savedTools.filter((tool) => READ_ONLY_TOOLS.has(tool)) : data.savedTools;
+        const controls = [...config.controls];
+        if (phase === "planning" && data.proposal) controls.push("plan_approve");
+        return [...new Set([...tools, ...controls])];
+    }
+
+    /** Enters a phase and applies its tool permissions. */
+    function transition(ctx: ExtensionContext, next: PlanState): void {
+        if (data.phase === next) return;
+        if (data.phase === "off" && next !== "off") data.savedTools = baseTools();
+        data.phase = next;
         if (next === "off") {
-            steps = [];
-            planTurnActive = false;
-            pendingPlanRequest = 0;
+            data.proposal = undefined;
+            pi.setActiveTools(data.savedTools);
+        } else {
+            pi.setActiveTools(toolsFor(next));
         }
         setPlanStatus(ctx);
-        ctx.ui.notify(message ?? (next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]));
+        ctx.ui.notify(next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]);
         persistState();
     }
 
-    /** Accepts the proposed plan and tells the agent to implement it. */
-    function accept(ctx: ExtensionContext): void {
-        transition(ctx, "implementing");
-        pi.sendUserMessage("The plan is accepted. Begin implementation now.", { deliverAs: "followUp" });
+    /** Throws when a control tool is called outside its allowed phase. */
+    function requirePhase(expected: PlanState): void {
+        if (data.phase !== expected) throw new Error(`This action is available only in ${expected} mode.`);
     }
 
-    /**
-     * Returns true if the first word is a known safe tool or a known
-     * subcommand of a restricted tool (e.g. `git status`).
-     */
-    function isCommandSafe(words: string[]): boolean {
-        const [cmd, sub, sub2] = words;
-        if (!cmd) return false;
-        if (SAFE_TOOLS.has(cmd)) {
-            if (cmd === "find" && words.some((w) => w === "-exec" || w === "-execdir")) return false;
-            return true;
+    /** Reads one bundled phase prompt. */
+    function readBundledPrompt(phase: PlanState): string | null {
+        try {
+            return readFileSync(new URL(`../prompts/${phase}.md`, import.meta.url), "utf8");
+        } catch {
+            return null;
         }
-        const allowed = SAFE_SUBCOMMANDS[cmd];
-        if (allowed != null && sub != null && allowed.includes(sub)) return true;
-        const groups = SAFE_SUBCOMMAND_GROUPS[cmd];
-        if (groups != null && sub != null) {
-            const inner = groups[sub];
-            if (inner != null) return sub2 == null || inner.includes(sub2);
-        }
-        return false;
     }
 
-    /**
-     * Returns true if every segment of a shell command is safe.
-     * Blocks backticks and {@link BLOCK_OPS}. Splits on {@link CHAIN_OPS}
-     * and checks each segment independently.
-     */
-    function isSafe(command: string): boolean {
-        // Raw-string checks come first for patterns shell-quote does not model as operators.
-        if (command.includes("`") || command.includes("$(")) return false;
-        const tokens = parseShell(command);
-        const segments: string[][] = [[]];
-        for (let i = 0; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (typeof tok === "string") {
-                segments[segments.length - 1].push(tok);
-            } else if ("op" in tok) {
-                if (tok.op === ">&" && i + 1 < tokens.length) {
-                    const next = tokens[i + 1];
-                    if (typeof next === "string" && /^\d+$/.test(next)) continue;
-                    return false;
-                }
-                if (BLOCK_OPS.has(tok.op)) return false;
-                if (CHAIN_OPS.has(tok.op)) segments.push([]);
-                // Unknown operators (e.g. bare `(` `)` from $()) are intentionally ignored;
-                // the $() case is already caught by the raw-string check above.
-            }
-        }
-        return segments.every(isCommandSafe);
+    /** Loads the compact prompt contract for a phase. */
+    function loadPhasePrompt(phase: PlanState): string | null {
+        const cached = promptCache.get(phase);
+        if (cached) return cached;
+        const content = (options.loadPrompt ?? readBundledPrompt)(phase);
+        if (content) promptCache.set(phase, content);
+        return content;
     }
 
-    /**
-     * Extracts the title from a markdown list item.
-     * Handles `**Title** — description`, falls back to text before ` —`.
-     */
-    function extractBoldTitle(text: string): string | null {
-        if (text.startsWith("**")) {
-            const close = text.indexOf("**", 2);
-            if (close > 2) return text.slice(2, close).trim();
-        }
-        const sep = text.search(/\s[—–-]{1,3}\s/);
-        const fallback = sep > 0 ? text.slice(0, sep).trim() : text.trim();
-        return fallback.length > 0 ? fallback : null;
-    }
-
-    /**
-     * Extracts the joined text content of the last assistant message.
-     * Returns null if no assistant message is present.
-     */
-    function lastAssistantText(messages: unknown[]): string | null {
-        type Msg = { role?: string; content?: Array<{ type?: string; text?: string }> };
-        const last = (messages as Msg[]).findLast((m) => m.role === "assistant" && Array.isArray(m.content));
-        if (!last?.content) return null;
-        return last.content
-            .filter((b) => b.type === "text")
-            .map((b) => b.text ?? "")
+    /** Formats the approved proposal for the implementation contract. */
+    function formatProposal(proposal: PlanProposal): string {
+        const steps = proposal.steps
+            .map((step, index) => `${index + 1}. ${step.title} — ${step.description}`)
             .join("\n");
+        return `Approved work: ${proposal.summary}\n${steps}`;
     }
 
-    /**
-     * Parses a markdown message for an ordered list under a `## Steps` heading.
-     * Returns an array of {@link PlanStep} with incrementing step numbers.
-     */
-    function extractPlanSteps(message: string): PlanStep[] {
-        const tokens = marked.lexer(message);
-        const items: PlanStep[] = [];
-        let inSteps = false;
-
-        for (const tok of tokens) {
-            if (tok.type === "heading" && tok.depth <= 3 && tok.text.trim().toLowerCase().includes("steps")) {
-                inSteps = true;
-                continue;
-            }
-            if (inSteps && tok.type === "heading") break;
-            if (!inSteps || tok.type !== "list" || !tok.ordered) continue;
-
-            for (const item of tok.items) {
-                const title = extractBoldTitle(item.text);
-                if (title && title.length >= 2) items.push({ step: items.length + 1, text: title });
-            }
-            break;
+    /** Requests approval for the currently stored proposal. */
+    async function approveProposal(ctx: ExtensionContext) {
+        if (!data.proposal) throw new Error("No stored proposal is available.");
+        if (!ctx.hasUI) {
+            return {
+                content: [{ type: "text" as const, text: "Proposal stored. Approval requires a UI session." }],
+                details: {},
+            };
         }
-        return items;
-    }
-
-    /**
-     * Loads the plan mode SKILL.md: preferring the copy bundled with this
-     * package, falling back to a user copy in the agent home.
-     * Returns null if neither exists or cannot be read.
-     */
-    function loadSkillContent(phase: string): string | null {
-        const candidates: (URL | string)[] = [new URL(`../skills/plan/${phase}.md`, import.meta.url)];
-        if (process.env.HOME) {
-            candidates.push(join(process.env.HOME, ".pi", "agent", "skills", "plan", `${phase}.md`));
+        const choice = await ctx.ui.select("Plan proposed — accept?", ["Implement now", "Back to brainstorming"]);
+        if (choice === "Implement now") {
+            transition(ctx, "implementing");
+            return {
+                content: [{ type: "text" as const, text: "Proposal approved. Begin implementation." }],
+                details: {},
+            };
         }
-        for (const candidate of candidates) {
-            try {
-                return readFileSync(candidate, "utf8");
-            } catch {
-                /* try the next candidate */
-            }
+        if (choice === "Back to brainstorming") {
+            data.proposal = undefined;
+            transition(ctx, "brainstorming");
+            return {
+                content: [{ type: "text" as const, text: "Proposal rejected. Brainstorming restored." }],
+                details: {},
+            };
         }
-        return null;
+        return {
+            content: [{ type: "text" as const, text: "Proposal stored in planning without approval." }],
+            details: {},
+        };
     }
 
-    /** Notifies when the agent proposes a plan during brainstorming without being asked. */
-    function handleBrainstormingTurn(messages: unknown[], ctx: ExtensionContext): void {
-        const text = lastAssistantText(messages);
-        if (text && extractPlanSteps(text).length > 0)
-            ctx.ui.notify("Agent proposed a plan unprompted — run /plan create when ready.", "warning");
-    }
-
-    /** Extracts steps, shows the accept/reject dialog, and drives the planning → implementing transition. */
-    async function handlePlanTurn(messages: unknown[], ctx: ExtensionContext): Promise<void> {
-        const text = lastAssistantText(messages);
-        if (!text) {
-            persistState();
-            return;
-        }
-        const extracted = extractPlanSteps(text);
-        if (extracted.length === 0)
-            ctx.ui.notify("No steps extracted — review the plan above before accepting.", "warning");
-        steps = extracted;
-        persistState();
-        const choice = await ctx.ui.select("Plan proposed — accept?", [...DIALOG_OPTIONS]);
-        if (choice === "Implement now") accept(ctx);
-        else if (choice === "Back to brainstorming") transition(ctx, "brainstorming");
-        else ctx.ui.notify("Still in planning — /plan create to re-draft, /plan disable to exit.");
-    }
-
-    const subcommandHandlers: Record<string, (ctx: ExtensionContext) => void> = {
-        create(ctx) {
-            if (state === "off") {
-                ctx.ui.notify("Not in plan mode.", "warning");
-                return;
-            }
-            if (!isReadOnly()) {
-                ctx.ui.notify("Wait for the current turn to end first.", "warning");
-                return;
-            }
-            pendingPlanRequest++;
+    pi.registerTool({
+        name: "plan_propose",
+        label: "Enter Planning",
+        description: "Enter planning after the user requests a formal proposal",
+        parameters: Type.Object({}),
+        async execute(_id, _params, _signal, _update, ctx) {
+            requirePhase("brainstorming");
             transition(ctx, "planning");
-            pi.sendUserMessage("Produce the formal PRD now.", { deliverAs: "followUp" });
+            return {
+                content: [{ type: "text" as const, text: "Planning mode active. Submit with plan_submit." }],
+                details: {},
+            };
         },
-        disable: (ctx) => {
-            if (state === "off") {
-                ctx.ui.notify("Not in plan mode.", "warning");
+    });
+
+    pi.registerTool({
+        name: "plan_submit",
+        label: "Submit Plan",
+        description: "Submit a structured proposal for user approval",
+        parameters: PLAN_PROPOSAL_SCHEMA,
+        async execute(_id, params, _signal, _update, ctx) {
+            requirePhase("planning");
+            data.proposal = params;
+            persistState();
+            pi.setActiveTools(toolsFor("planning"));
+            return approveProposal(ctx);
+        },
+    });
+
+    pi.registerTool({
+        name: "plan_approve",
+        label: "Approve Stored Plan",
+        description: "Approve a proposal already stored in planning",
+        parameters: Type.Object({}),
+        async execute(_id, _params, _signal, _update, ctx) {
+            requirePhase("planning");
+            return approveProposal(ctx);
+        },
+    });
+
+    pi.registerTool({
+        name: "plan_complete",
+        label: "Complete Plan",
+        description: "Complete the approved proposal after implementation and verification",
+        parameters: Type.Object({}),
+        async execute(_id, _params, _signal, _update, ctx) {
+            requirePhase("implementing");
+            if (activeImplementationTools.size > 0) {
+                throw new Error("plan_complete must run after all implementation tools finish.");
+            }
+            data.proposal = undefined;
+            transition(ctx, "brainstorming");
+            return {
+                content: [{ type: "text" as const, text: "Implementation complete. Brainstorming restored." }],
+                details: {},
+            };
+        },
+    });
+
+    const subcommands: Record<string, (ctx: ExtensionContext) => void> = {
+        create(ctx) {
+            if (data.phase !== "brainstorming") {
+                ctx.ui.notify("/plan create is available only in brainstorming.", "warning");
+                return;
+            }
+            transition(ctx, "planning");
+            pi.sendUserMessage("Draft and submit the formal proposal.", { deliverAs: "followUp" });
+        },
+        bstorm(ctx) {
+            if (data.phase !== "planning") {
+                ctx.ui.notify("/plan bstorm is available only in planning.", "warning");
+                return;
+            }
+            data.proposal = undefined;
+            transition(ctx, "brainstorming");
+        },
+        disable(ctx) {
+            if (data.phase === "off") {
+                ctx.ui.notify("Plan mode is already disabled.", "warning");
                 return;
             }
             transition(ctx, "off");
@@ -268,18 +239,19 @@ export default function planMode(pi: ExtensionAPI): void {
     };
 
     pi.registerCommand("plan", {
-        description: "Plan mode: enter brainstorming, or run a subcommand (create / disable)",
+        description: "Enter plan mode or use a phase-specific fallback",
         getArgumentCompletions: (prefix: string) => {
-            const matches = PLAN_SUBCOMMANDS.filter((s) => s.value.startsWith(prefix));
+            const matches = PHASES[data.phase].commands.filter((item) => item.value.startsWith(prefix));
             return matches.length > 0 ? matches : null;
         },
         handler: async (args, ctx) => {
-            if (!args?.trim()) {
-                if (state === "off") transition(ctx, "brainstorming");
-                else ctx.ui.notify(`Already in plan mode (${state}).`);
+            const command = args?.trim();
+            if (!command) {
+                if (data.phase === "off") transition(ctx, "brainstorming");
+                else ctx.ui.notify(`Already in plan mode (${data.phase}).`);
                 return;
             }
-            const handler = subcommandHandlers[args.trim()];
+            const handler = subcommands[command];
             if (!handler) {
                 ctx.ui.notify(`Unknown subcommand: ${args}`, "warning");
                 return;
@@ -289,82 +261,59 @@ export default function planMode(pi: ExtensionAPI): void {
     });
 
     pi.on("tool_call", (event) => {
-        if (!isReadOnly() || event.toolName !== "bash") return;
+        if ((data.phase !== "brainstorming" && data.phase !== "planning") || event.toolName !== "bash") return;
         const command = event.input.command;
-        if (typeof command !== "string" || !isSafe(command)) {
-            return {
-                block: true,
-                reason: `Plan mode: blocked — not a read-only command.\n${command}`,
-            };
+        if (typeof command !== "string" || !isAllowedInspectionCommand(command)) {
+            return { block: true, reason: `Plan mode: blocked — not a read-only command.\n${command}` };
         }
     });
 
-    pi.on("before_agent_start", () => {
-        if (pendingPlanRequest > 0) {
-            planTurnActive = true;
-            pendingPlanRequest--;
-            persistState();
+    pi.on("tool_execution_start", (event) => {
+        if (data.phase === "implementing" && !CONTROL_TOOLS.has(event.toolName)) {
+            activeImplementationTools.add(event.toolCallId);
         }
-        const base = skillCache.get(state) ?? loadSkillContent(state);
-        if (!base) return;
-        skillCache.set(state, base);
-        const content =
-            state === "implementing" && steps.length > 0
-                ? `${base}\n\n## Plan steps\n\n${steps.map((s) => `${s.step}. ${s.text}`).join("\n")}`
-                : base;
-        return { message: { customType: "plan-context", content, display: false } };
     });
 
-    pi.on("agent_end", async (event, ctx) => {
-        if (state === "off" || !ctx.hasUI) return;
-        if (!planTurnActive) {
-            if (state === "implementing")
-                transition(ctx, "brainstorming", "Back to brainstorming — /plan create to resume planning.");
-            else if (state === "brainstorming") handleBrainstormingTurn(event.messages, ctx);
+    pi.on("tool_execution_end", (event) => {
+        activeImplementationTools.delete(event.toolCallId);
+    });
+
+    pi.on("before_agent_start", (event, ctx) => {
+        if (data.phase === "off") return;
+        const base = loadPhasePrompt(data.phase);
+        if (!base) {
+            if (!promptFailures.has(data.phase)) {
+                promptFailures.add(data.phase);
+                ctx.ui.notify(`Plan mode prompt is missing for phase: ${data.phase}`, "error");
+            }
             return;
         }
-        planTurnActive = false;
-        await handlePlanTurn(event.messages, ctx);
+        const contract =
+            data.phase === "implementing" && data.proposal ? `${base}\n\n${formatProposal(data.proposal)}` : base;
+        return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
+    });
+
+    pi.on("session_shutdown", () => {
+        activeImplementationTools.clear();
+        if (data.phase !== "off") pi.setActiveTools(data.savedTools);
     });
 
     pi.on("session_start", (_event, ctx) => {
-        skillCache.clear();
-        const entries = ctx.sessionManager.getEntries() as Array<{ type: string; customType?: string; data?: unknown }>;
-        const planEntry = entries.filter((e) => e.type === "custom" && e.customType === "plan-mode").pop() as
-            | {
-                  data?: {
-                      state?: PlanState;
-                      enabled?: boolean;
-                      /** legacy field, superseded by planTurnActive */
-                      creating?: boolean;
-                      planTurnActive?: boolean;
-                      pendingPlanRequest?: number;
-                      steps?: PlanStep[];
-                  };
-              }
-            | undefined;
-
-        if (!planEntry?.data) {
+        promptCache.clear();
+        promptFailures.clear();
+        activeImplementationTools.clear();
+        const entry = ctx.sessionManager
+            .getBranch()
+            .filter((candidate) => candidate.type === "custom" && candidate.customType === "plan-mode")
+            .pop() as { data?: unknown } | undefined;
+        if (!entry) {
+            data = normalizePlanModeData(undefined, baseTools());
+            data.savedTools = baseTools();
             transition(ctx, "brainstorming");
             return;
         }
-
-        const data = planEntry.data;
-        if (data.state && PLAN_STATES_SET.has(data.state)) {
-            state = data.state as PlanState;
-        } else if (data.enabled) {
-            state = data.steps?.length ? "planning" : "brainstorming";
-        } else {
-            state = "off";
-        }
-        planTurnActive = data.planTurnActive ?? data.creating ?? false;
-        pendingPlanRequest = data.pendingPlanRequest ?? 0;
-        steps = data.steps ?? [];
-
-        if (isReadOnly()) {
-            savedTools = pi.getActiveTools();
-            pi.setActiveTools(savedTools.filter((t) => !WRITE_TOOLS.has(t)));
-        }
+        data = normalizePlanModeData(entry.data, baseTools());
+        if (data.phase !== "off") pi.setActiveTools(toolsFor(data.phase));
         setPlanStatus(ctx);
     });
 }

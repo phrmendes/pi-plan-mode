@@ -1,58 +1,52 @@
 {
-  "name": "@phrmendes/pi-plan-mode",
-  "version": "1.0.0",
-  "description": "Plan mode for the pi coding agent: gated brainstorming, plan proposals with an approval dialog, and time-boxed implementation windows",
-  "license": "Apache-2.0",
-  "type": "module",
-  "keywords": [
-    "pi-package"
-  ],
-  "files": [
-    "src",
-    "skills"
-  ],
-  "scripts": {
-    "test": "node --test src/index.test.ts",
-    "typecheck": "tsc -p tsconfig.json",
-    "format": "prettier --write src/",
-    "format:check": "prettier --check src/",
-    "lint": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "marked": "^18.0.5",
-    "shell-quote": "^1.8.4"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.7",
-    "@earendil-works/pi-tui": "0.80.7",
-    "eslint": "^10.8.0",
-    "eslint-config-prettier": "^10.1.8",
-    "prettier": "^3.9.6",
-    "typescript": "latest",
-    "typescript-eslint": "^8.65.0"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
-  },
-  "overrides": {
-    "@earendil-works/pi-coding-agent": {
-      "brace-expansion": "^5.0.8"
-    }
-  },
-  "packageManager": "pnpm@11.17.0",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/phrmendes/pi-plan-mode.git"
-  },
-  "bugs": "https://github.com/phrmendes/pi-plan-mode/issues",
-  "homepage": "https://github.com/phrmendes/pi-plan-mode",
-  "pi": {
-    "extensions": [
-      "./src/index.ts"
+    "name": "@phrmendes/pi-plan-mode",
+    "version": "1.0.0",
+    "description": "Plan mode for the pi coding agent: gated brainstorming, plan proposals with an approval dialog, and time-boxed implementation windows",
+    "license": "Apache-2.0",
+    "type": "module",
+    "keywords": [
+        "pi-package"
     ],
-    "skills": [
-      "./skills"
-    ]
-  }
+    "files": [
+        "src",
+        "prompts",
+        "!src/*.test.ts"
+    ],
+    "scripts": {
+        "test": "node --test src/*.test.ts",
+        "typecheck": "tsc -p tsconfig.json",
+        "format": "prettier --write src/",
+        "format:check": "prettier --check src/",
+        "lint": "tsc -p tsconfig.json",
+        "pack:check": "rm -rf /tmp/pi-plan-mode-pack && mkdir -p /tmp/pi-plan-mode-pack && pnpm pack --pack-destination /tmp/pi-plan-mode-pack && tar -tf /tmp/pi-plan-mode-pack/*.tgz"
+    },
+    "dependencies": {
+        "shell-quote": "^1.8.4",
+        "typebox": "^1.3.14"
+    },
+    "devDependencies": {
+        "@earendil-works/pi-coding-agent": "0.84.0",
+        "prettier": "^3.9.6",
+        "typescript": "latest"
+    },
+    "peerDependencies": {
+        "@earendil-works/pi-coding-agent": "*"
+    },
+    "overrides": {
+        "@earendil-works/pi-coding-agent": {
+            "brace-expansion": "^5.0.8"
+        }
+    },
+    "packageManager": "pnpm@11.17.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/phrmendes/pi-plan-mode.git"
+    },
+    "bugs": "https://github.com/phrmendes/pi-plan-mode/issues",
+    "homepage": "https://github.com/phrmendes/pi-plan-mode",
+    "pi": {
+        "extensions": [
+            "./src/index.ts"
+        ]
+    }
 }

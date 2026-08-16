@@ -1,35 +1,55 @@
 # pi-plan-mode
 
-Plan mode for the [pi coding agent](https://github.com/earendil-works/pi): gated brainstorming, plan proposals with an approval dialog, and time-boxed implementation windows.
+Agent-driven plan mode for the [pi coding agent](https://github.com/earendil-works/pi), with read-only discovery, structured approval, and durable implementation sessions.
 
-## How it works
+## Flow
 
 ```mermaid
 stateDiagram-v2
-    [*] --> brainstorming : fresh session
-    brainstorming --> proposing : plan drafted
-    proposing --> implementing : accepted
-    proposing --> brainstorming : rejected
-    implementing --> brainstorming : turn ends
+    [*] --> brainstorming : fresh session or /plan
+    brainstorming --> planning : plan_propose or /plan create
+    planning --> brainstorming : /plan bstorm
+    planning --> implementing : approved plan_submit
+    implementing --> brainstorming : plan_complete
 ```
 
-`Ctrl+Alt+P` moves one step forward manually at any point; `/plan disable` exits to `off` from any state.
+The agent normally advances the workflow through typed control tools:
 
-- **brainstorming** — every fresh session starts here, read-only: `edit`/`write` are removed and bash is gated to a read-only allowlist. Explore and discuss, then run `/plan create` for a formal plan.
-- **proposing** — the drafted plan is presented with a dialog: **Implement now**, **Back to brainstorming** (keep refining), or **Esc** (decide later).
-- **implementing** — full tools. When the agent's turn ends, the extension automatically returns to **brainstorming**. Plan steps are kept so work can resume.
-- **off** — `/plan disable` exits plan mode entirely.
+- `plan_propose` enters planning after the user requests a proposal.
+- `plan_submit` sends structured files and work items for approval.
+- `plan_approve` reopens approval for a stored proposal without resubmission.
+- `plan_complete` ends implementation after all work is verified.
 
-State persists across session restarts.
+Implementation remains active across retries and user turns. Approval applies to the accepted proposal, not only one agent run. `plan_complete` must run separately after all implementation and verification tools finish.
 
-## Commands and keys
+## Manual fallbacks
 
-| Input           | Action                                                                                                                           |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `Ctrl+Alt+P`    | Cycle `brainstorming → proposing → implementing → brainstorming` (guarded: advancing from brainstorming requires a drafted plan) |
-| `/plan`         | Enter brainstorming (from `off`)                                                                                                 |
-| `/plan create`  | Ask the agent to draft the formal plan                                                                                           |
-| `/plan disable` | Exit plan mode                                                                                                                   |
+The `/plan` command is always registered. Its argument suggestions depend on the current phase.
+
+| Phase         | Available input                 |
+| ------------- | ------------------------------- |
+| Off           | `/plan`                         |
+| Brainstorming | `/plan create`, `/plan disable` |
+| Planning      | `/plan bstorm`, `/plan disable` |
+| Implementing  | `/plan disable`                 |
+
+Invalid phase transitions are rejected.
+
+## Permissions
+
+Brainstorming and planning expose only `read`, gated `bash`, and the control tool for the current phase. Bash commands must match a conservative inspection allowlist.
+
+Implementation restores the tools captured when plan mode started and adds `plan_complete`. Disabling plan mode restores the captured tools. Before reload, new, resume, or fork, the old runtime also restores the captured tools. Restoring an already disabled session does not change current tools.
+
+The bash gate reduces accidental writes. It is not a security sandbox. Commands still run with the user's permissions, so install only extensions that you trust.
+
+## State and prompts
+
+The current phase, structured proposal, and original tool snapshot persist on the active session branch. Invalid persisted data is normalized during startup.
+
+Phase instructions are compact, turn-local system-prompt additions. They are not stored as conversation messages or discoverable pi skills.
+
+A proposal submitted without a UI remains in planning. In a UI-capable session, `plan_approve` can approve it without submitting the proposal again.
 
 ## Install
 
@@ -40,10 +60,27 @@ pi install npm:@phrmendes/pi-plan-mode
 ## Development
 
 ```bash
-devenv shell      # optional: node + pnpm + tsgo (compiler & LSP)
+devenv shell
 pnpm install
-pnpm test         # node:test suite, no framework
+pnpm test
 pnpm run typecheck
+pnpm run format:check
+```
+
+## Runtime checks
+
+Before a release, verify these flows in the real pi TUI:
+
+- Enter and disable plan mode.
+- Reload while brainstorming.
+- Start a new session while planning.
+- Resume and approve a stored proposal with `plan_approve`.
+- Confirm that `plan_complete` is rejected while another tool runs.
+
+Verify package contents with:
+
+```bash
+pnpm run pack:check
 ```
 
 ## License

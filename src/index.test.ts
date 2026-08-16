@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import planMode from "./index.ts";
+import { PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanProposal } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
-const READ_ONLY_TOOLS = ["read", "bash"];
-
-const PLAN_MD = "### Steps\n\n1. **First step** — do a thing\n2. **Second step** — do another\n";
+const PROPOSAL: PlanProposal = {
+    summary: "Improve flow",
+    files: [{ path: "src/index.ts", reason: "Change orchestration" }],
+    steps: [{ title: "Refactor", description: "Use control tools" }],
+};
 
 interface Entry {
     type: string;
@@ -13,424 +16,316 @@ interface Entry {
     data: unknown;
 }
 
+interface Completion {
+    value: string;
+}
+
+interface RegisteredCommand {
+    handler(args: string, ctx: unknown): Promise<void> | void;
+    getArgumentCompletions(prefix: string): Completion[] | null;
+}
+
+interface ToolResult {
+    content: Array<{ type: string; text: string }>;
+    details: unknown;
+}
+
+interface RegisteredTool {
+    name: string;
+    parameters: unknown;
+    execute(id: string, input: unknown, signal: undefined, update: undefined, ctx: unknown): Promise<ToolResult>;
+}
+
+type EventHandler = (event: unknown, ctx: unknown) => unknown;
+
+interface HarnessOptions {
+    entries?: Entry[];
+    branch?: Entry[];
+    tools?: string[];
+    choices?: (string | undefined)[];
+    hasUI?: boolean;
+    loadPrompt?: (phase: string) => string | null;
+}
+
 function entry(data: unknown): Entry {
     return { type: "custom", customType: "plan-mode", data };
 }
 
-function assistantMsg(text: string): unknown {
-    return { role: "assistant", content: [{ type: "text", text }] };
-}
-
-interface HarnessOpts {
-    entries?: Entry[];
-    tools?: string[];
-    selectChoices?: (string | undefined)[];
-    /** When true, sendUserMessage with followUp queues instead of starting a turn directly. */
-    streaming?: boolean;
-}
-
-/**
- * Drives the real extension through a stubbed pi/ctx.
- * `selectChoices` is the canned approval-dialog answer; undefined simulates Esc.
- */
-function createHarness(opts: HarnessOpts = {}) {
-    const events = new Map<string, (...args: any[]) => any>();
-    const commands = new Map<string, { handler: (args: string, ctx: any) => any }>();
-    let activeTools = opts.tools ?? [...FULL_TOOLS];
-    const appended: Array<{
-        state?: string;
-        planTurnActive?: boolean;
-        pendingPlanRequest?: number;
-        steps?: unknown[];
-    }> = [];
+/** Drives the extension through stubbed pi and context APIs. */
+function createHarness(options: HarnessOptions = {}) {
+    const events = new Map<string, EventHandler>();
+    const commands = new Map<string, RegisteredCommand>();
+    const tools = new Map<string, RegisteredTool>();
+    const appended: PlanModeData[] = [];
     const sent: string[] = [];
-    const sentOpts: Array<{ deliverAs?: string } | undefined> = [];
     const notes: string[] = [];
+    let activeTools = options.tools ?? [...FULL_TOOLS];
     let status: string | undefined;
-    const statuses: Array<string | undefined> = [];
+    let setActiveToolsCalls = 0;
     let selectCalls = 0;
-    const streaming = opts.streaming ?? false;
-    const followUpQueue: Array<{ msg: string; opts?: { deliverAs?: string } }> = [];
 
     const pi = {
-        registerCommand: (name: string, def: any) => void commands.set(name, def),
-        on: (event: string, fn: any) => void events.set(event, fn),
-        appendEntry: (_type: string, data: any) => void appended.push(data),
-        sendUserMessage: (msg: string, opts?: { deliverAs?: string }) => {
-            sent.push(msg);
-            sentOpts.push(opts);
-            if (streaming && opts?.deliverAs === "followUp") {
-                followUpQueue.push({ msg, opts });
-            }
-        },
+        registerCommand: (name: string, definition: RegisteredCommand) => void commands.set(name, definition),
+        registerTool: (definition: RegisteredTool) => void tools.set(definition.name, definition),
+        on: (name: string, handler: EventHandler) => void events.set(name, handler),
+        appendEntry: (_type: string, value: PlanModeData) => void appended.push(value),
+        sendUserMessage: (message: string) => void sent.push(message),
         getActiveTools: () => [...activeTools],
-        setActiveTools: (tools: string[]) => {
-            activeTools = [...tools];
+        setActiveTools: (names: string[]) => {
+            setActiveToolsCalls++;
+            activeTools = [...names];
         },
     };
     const ctx = {
-        hasUI: true,
+        hasUI: options.hasUI ?? true,
         ui: {
-            setStatus: (_key: string, value?: string) => {
-                status = value;
-                statuses.push(value);
-            },
-            notify: (msg: string) => void notes.push(msg),
+            setStatus: (_key: string, value?: string) => void (status = value),
+            notify: (message: string) => void notes.push(message),
             select: async () => {
                 selectCalls++;
-                return (opts.selectChoices ?? []).shift();
+                return (options.choices ?? []).shift();
             },
         },
-        sessionManager: { getEntries: () => opts.entries ?? [] },
+        sessionManager: {
+            getEntries: () => options.entries ?? options.branch ?? [],
+            getBranch: () => options.branch ?? options.entries ?? [],
+        },
     };
 
-    planMode(pi as any);
+    planMode(pi as unknown as Parameters<typeof planMode>[0], { loadPrompt: options.loadPrompt });
 
     return {
-        sent,
-        sentOpts,
-        notes,
         appended,
+        sent,
+        notes,
         start: () => events.get("session_start")!({}, ctx),
-        command: (args: string) => commands.get("plan")!.handler(args, ctx),
-        agentEnd: (messages: unknown[] = []) => events.get("agent_end")!({ messages }, ctx),
-        beforeAgentStart: () => {
-            const home = process.env.HOME;
-            process.env.HOME = "/nonexistent";
-            try {
-                return events.get("before_agent_start")!() as
-                    { message?: { customType?: string; content?: string } } | undefined;
-            } finally {
-                process.env.HOME = home;
-            }
-        },
-        /** Simulates a finished agent turn that produced no relevant messages. */
-        endTurn: () => events.get("agent_end")!({ messages: [] }, ctx),
-        toolCall: (toolName: string, command: string) => events.get("tool_call")!({ toolName, input: { command } }),
+        command: (args = "") => commands.get("plan")!.handler(args, ctx),
+        completions: (prefix = "") =>
+            commands
+                .get("plan")!
+                .getArgumentCompletions(prefix)
+                ?.map((item) => item.value) ?? [],
+        tool: (name: string, input: unknown = {}, id = "id") =>
+            tools.get(name)!.execute(id, input, undefined, undefined, ctx),
+        toolDefinition: (name: string) => tools.get(name)!,
+        emit: (name: string, event: unknown = {}) => events.get(name)?.(event, ctx),
+        toolCall: (toolName: string, command: string) =>
+            events.get("tool_call")?.({ toolName, input: { command } }, ctx) as { block?: boolean } | undefined,
+        beforeAgentStart: (systemPrompt = "base") =>
+            events.get("before_agent_start")!({ systemPrompt }, ctx) as {
+                systemPrompt: string;
+                message?: unknown;
+            },
         get activeTools() {
             return activeTools;
         },
         get status() {
             return status;
         },
-        get planStatuses() {
-            return statuses.filter((s) => s?.startsWith("plan: "));
+        get setActiveToolsCalls() {
+            return setActiveToolsCalls;
         },
         get selectCalls() {
             return selectCalls;
         },
-        lastNote: () => notes[notes.length - 1],
     };
 }
 
-test("fresh session starts in brainstorming with write tools disabled", () => {
+test("fresh session enters brainstorming with the agent transition tool", () => {
     const h = createHarness();
     h.start();
     assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
-    assert.equal(h.appended.at(-1)?.state, "brainstorming");
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose"]);
 });
 
-test("create flow: draft → planning → accept → implementing → auto-return", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-
-    h.command("create");
-    assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
-    assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
-
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.selectCalls, 1);
-    assert.deepEqual(h.planStatuses, ["plan: brainstorming", "plan: planning", "plan: implementing"]);
-    assert.equal(h.status, "plan: implementing");
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
-    assert.equal(h.sent.at(-1), "The plan is accepted. Begin implementation now.");
-    assert.deepEqual(h.sentOpts.at(-1), { deliverAs: "followUp" });
-
-    await h.endTurn();
-    assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
-    assert.equal(h.appended.at(-1)?.state, "brainstorming");
-    assert.ok((h.appended.at(-1)?.steps ?? []).length > 0);
-});
-
-test("dialog reject → back to brainstorming, still read-only", async () => {
-    const h = createHarness({ selectChoices: ["Back to brainstorming"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, READ_ONLY_TOOLS);
-    assert.deepEqual(h.sent, ["Produce the formal PRD now."]);
-});
-
-test("dialog dismissed → stays planning", async () => {
-    const h = createHarness({ selectChoices: [undefined] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.status, "plan: planning");
-    assert.equal(h.sent.length, 1);
-});
-
-test("failed extraction warns but still shows dialog", async () => {
-    const h = createHarness({ selectChoices: ["Back to brainstorming"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("no plan here")]);
-    assert.match(h.notes.join(" "), /no steps extracted/i);
-    assert.equal(h.selectCalls, 1, "dialog must always appear");
-    assert.equal(h.status, "plan: brainstorming");
-});
-
-test("failed extraction with accept transitions to implementing", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("no plan here")]);
-    assert.equal(h.selectCalls, 1);
-    assert.equal(h.status, "plan: implementing");
-});
-
-test("extraction matches heading substrings like ## Implementation Steps", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("## Implementation Steps\n\n1. **Do X** — because\n2. **Do Y** — also")]);
-    assert.equal(h.selectCalls, 1);
-    assert.equal(h.status, "plan: implementing");
-});
-
-test("extraction handles files section before steps", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("### Files\n\n- `src/a.ts` — entry\n\n### Steps\n\n1. **Refactor** — cleanup")]);
-    assert.equal(h.selectCalls, 1);
-    assert.equal(h.status, "plan: implementing");
-});
-
-test("disable exits plan mode, restores tools, clears steps", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    await h.endTurn();
-
-    h.command("disable");
-    assert.equal(h.status, undefined);
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
-    assert.deepEqual(h.appended.at(-1)?.steps, []);
-    assert.equal(h.appended.at(-1)?.state, "off");
-});
-
-test("legacy entries map enabled/steps onto states", () => {
-    const fresh = (data: unknown) => {
-        const h = createHarness({ entries: [entry(data)] });
-        h.start();
-        return h;
-    };
-
-    const legacyBrainstorm = fresh({ enabled: true, creating: false, steps: [] });
-    assert.equal(legacyBrainstorm.status, "plan: brainstorming");
-    assert.deepEqual(legacyBrainstorm.activeTools, READ_ONLY_TOOLS);
-
-    const legacyPlanning = fresh({ enabled: true, creating: false, steps: [{ step: 1, text: "x" }] });
-    assert.equal(legacyPlanning.status, "plan: planning");
-    assert.deepEqual(legacyPlanning.activeTools, READ_ONLY_TOOLS);
-
-    const legacyOff = fresh({ enabled: false, creating: false, steps: [] });
-    assert.equal(legacyOff.status, undefined);
-    assert.deepEqual(legacyOff.activeTools, FULL_TOOLS);
-});
-
-test("tool_call blocked in read-only states, free in implementing", () => {
-    const readOnly = createHarness();
-    readOnly.start();
-    assert.equal(readOnly.toolCall("bash", "rm -rf /")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "git status"), undefined);
-    assert.equal(readOnly.toolCall("bash", "echo $(cat /etc/passwd)")?.block, true);
-    assert.equal(readOnly.toolCall("bash", 'echo "$(whoami)"')?.block, true);
-    // added commands
-    assert.equal(readOnly.toolCall("bash", "awk '{print \$1}'")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "env rm -rf /")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "find . -exec cat {} \\;")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "find . -execdir ls {} \\;")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "printenv"), undefined);
-    assert.equal(readOnly.toolCall("bash", "git blame src/index.ts"), undefined);
-    assert.equal(readOnly.toolCall("bash", "npm ls"), undefined);
-    assert.equal(readOnly.toolCall("bash", "pnpm outdated"), undefined);
-    assert.equal(readOnly.toolCall("bash", "mix deps"), undefined);
-    // 3-level gating
-    assert.equal(readOnly.toolCall("bash", "uv pip list"), undefined);
-    assert.equal(readOnly.toolCall("bash", "uv pip install requests")?.block, true);
-    // removed from safeCommands
-    assert.equal(readOnly.toolCall("bash", "xargs rm")?.block, true);
-    assert.equal(readOnly.toolCall("bash", "sed s/foo/bar/ file")?.block, true);
-
-    const implementing = createHarness({ entries: [entry({ state: "implementing", steps: [] })] });
-    implementing.start();
-    assert.equal(implementing.toolCall("bash", "rm -rf /"), undefined);
-});
-
-test("auto-return notifies exactly once", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-
-    const before = h.notes.length;
-    await h.endTurn();
-    assert.equal(h.notes.length - before, 1);
-    assert.match(h.lastNote(), /brainstorming/i);
-});
-
-test("re-draft followed by dismiss persists the new steps", async () => {
-    const REVISED_MD = "### Steps\n\n1. **Third step** — revised\n2. **Fourth step** — more\n";
-    const h = createHarness({ selectChoices: [undefined, undefined] });
-    h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(REVISED_MD)]);
-
-    assert.deepEqual(h.appended.at(-1)?.steps, [
-        { step: 1, text: "Third step" },
-        { step: 2, text: "Fourth step" },
-    ]);
-});
-
-test("before_agent_start injects the per-state skill file", () => {
-    const h = createHarness();
-    h.start();
-
-    const result = h.beforeAgentStart();
-    assert.equal(result?.message?.customType, "plan-context");
-    assert.match(result?.message?.content ?? "", /# Brainstorming/);
-});
-
-test("before_agent_start does not inject skill in off state", () => {
-    const h = createHarness({ entries: [entry({ state: "off", steps: [] })] });
-    h.start();
-
-    const result = h.beforeAgentStart();
-    assert.equal(result, undefined);
-});
-
-test("before_agent_start injects plan steps into implementing skill", () => {
+test("restored off state does not change tools", () => {
     const h = createHarness({
-        entries: [
-            entry({
-                state: "implementing",
-                steps: [
-                    { step: 1, text: "Add login" },
-                    { step: 2, text: "Wire DB" },
-                ],
-            }),
-        ],
+        entries: [entry({ phase: "off", savedTools: FULL_TOOLS })],
+        tools: ["read", "custom"],
+    });
+    h.start();
+    assert.deepEqual(h.activeTools, ["read", "custom"]);
+    assert.equal(h.setActiveToolsCalls, 0);
+});
+
+test("phase prompt is turn-local system text", () => {
+    const h = createHarness();
+    h.start();
+    const result = h.beforeAgentStart();
+    assert.match(result.systemPrompt, /^base\n\n# Brainstorming/);
+    assert.equal(result.message, undefined);
+});
+
+test("plan_submit uses the durable proposal schema", () => {
+    const h = createHarness();
+    assert.equal(h.toolDefinition("plan_submit").parameters, PLAN_PROPOSAL_SCHEMA);
+});
+
+test("implementation prompt uses a compact proposal", () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
     });
     h.start();
     const result = h.beforeAgentStart();
-    assert.ok(result?.message?.content?.includes("Add login"), "steps injected into skill");
-    assert.ok(result?.message?.content?.includes("Wire DB"));
+    assert.match(result.systemPrompt, /Approved work: Improve flow/);
+    assert.match(result.systemPrompt, /Refactor — Use control tools/);
+    assert.doesNotMatch(result.systemPrompt, /Change orchestration/);
 });
 
-test("brainstorming guardrail warns when agent proposes plan unprompted", async () => {
+test("plan_propose enters planning without a synthetic user message", async () => {
     const h = createHarness();
     h.start();
-    const sentBefore = h.sent.length;
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.match(h.lastNote(), /unprompted/i);
-    assert.equal(h.sent.length, sentBefore, "no followUp sent — zero token cost");
-});
-
-test("brainstorming guardrail is silent when response has no plan", async () => {
-    const h = createHarness();
-    h.start();
-    const notesBefore = h.notes.length;
-    await h.agentEnd([assistantMsg("Just exploring the codebase, found some issues.")]);
-    assert.equal(h.notes.length, notesBefore);
-});
-
-test("create during streaming turn does not trigger dialog from wrong turn", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"], streaming: true });
-    h.start();
-
-    // agent is mid-turn (brainstorming) when /plan create runs
-    h.command("create");
-    assert.equal(h.sent.length, 1);
-
-    // current brainstorming turn ends — should NOT trigger plan dialog
-    await h.agentEnd([assistantMsg("Just exploring the codebase...")]);
-    assert.equal(h.selectCalls, 0, "dialog should not fire after the in-progress turn");
+    await h.tool("plan_propose");
     assert.equal(h.status, "plan: planning");
-
-    // followUp is delivered by pi, new turn starts
-    h.beforeAgentStart();
-    // plan turn ends — SHOULD trigger dialog
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.selectCalls, 1, "dialog should fire after the plan turn");
-    assert.equal(h.status, "plan: implementing");
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit"]);
+    assert.deepEqual(h.sent, []);
 });
 
-test("double create surfaces both plan dialogs", async () => {
-    const h = createHarness({ selectChoices: ["Implement now", "Implement now"], streaming: true });
+test("plan_submit approval enters persistent implementation", async () => {
+    const h = createHarness({ choices: ["Implement now"] });
     h.start();
+    await h.tool("plan_propose");
+    await h.tool("plan_submit", PROPOSAL);
+    assert.equal(h.status, "plan: implementing");
+    assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
+    assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
+});
 
-    // spam create twice during a streaming turn
-    h.command("create");
-    h.command("create");
-    assert.equal(h.sent.length, 2);
-
-    // in-progress turn ends — no dialog
-    await h.agentEnd([assistantMsg("Exploring...")]);
+test("plan_submit stores a proposal without UI approval", async () => {
+    const h = createHarness({ hasUI: false });
+    h.start();
+    await h.tool("plan_propose");
+    await h.tool("plan_submit", PROPOSAL);
+    assert.equal(h.status, "plan: planning");
     assert.equal(h.selectCalls, 0);
-
-    // first followUp turn
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg(PLAN_MD)]);
-    assert.equal(h.selectCalls, 1, "first plan should show dialog");
-
-    // second followUp turn
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("### Steps\n\n1. **Revised** — better")]);
-    assert.equal(h.selectCalls, 2, "second plan should show dialog");
+    assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_approve"]);
 });
 
-test("extraction accepts short titles and em-dash separators", async () => {
-    const h = createHarness({ selectChoices: ["Implement now"] });
+test("plan_approve approves a stored proposal without resubmission", async () => {
+    const h = createHarness({
+        choices: ["Implement now"],
+        entries: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
     h.start();
-    h.command("create");
-    h.beforeAgentStart();
-    await h.agentEnd([assistantMsg("### Steps\n\n1. **Go** — runs\n2. **Fix** — corrects\n3. **Refactor** — cleans")]);
-    assert.equal(h.selectCalls, 1);
+    await h.tool("plan_approve");
     assert.equal(h.status, "plan: implementing");
-
-    // restart for em-dash test
-    const h2 = createHarness({ selectChoices: ["Implement now"] });
-    h2.start();
-    h2.command("create");
-    h2.beforeAgentStart();
-    await h2.agentEnd([assistantMsg("### Steps\n\n1. **Add login** — add auth\n2. **Wire DB** -- connect")]);
-    assert.equal(h2.selectCalls, 1);
 });
 
-test("create is rejected outside read-only states", () => {
-    const h = createHarness({ entries: [entry({ state: "off", steps: [] })] });
+test("rejected proposal reports the actual outcome", async () => {
+    const h = createHarness({ choices: ["Back to brainstorming"] });
     h.start();
-    h.command("create");
-    assert.equal(h.sent.length, 0);
-    assert.match(h.lastNote(), /not in plan mode/i);
+    await h.tool("plan_propose");
+    const result = await h.tool("plan_submit", PROPOSAL);
+    assert.match(result.content[0].text, /rejected/i);
+    assert.equal(h.appended.at(-1)?.proposal, undefined);
+});
+
+test("plan_complete returns to brainstorming and clears the proposal", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.tool("plan_complete");
+    assert.equal(h.status, "plan: brainstorming");
+    assert.equal(h.appended.at(-1)?.proposal, undefined);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose"]);
+});
+
+test("implementation remains active across agent lifecycle events", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("agent_end", { messages: [] });
+    await h.emit("agent_settled");
+    assert.equal(h.status, "plan: implementing");
+    assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
+});
+
+test("plan_complete waits for implementation tools to finish", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit" });
+    await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
+    await h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
+    await h.tool("plan_complete");
+    assert.equal(h.status, "plan: brainstorming");
+});
+
+test("session shutdown restores the saved tool set", async () => {
+    const h = createHarness();
+    h.start();
+    await h.emit("session_shutdown", { reason: "new" });
+    assert.deepEqual(h.activeTools, FULL_TOOLS);
+});
+
+test("bash gate is wired to read-only phases", async () => {
+    const h = createHarness();
+    h.start();
+    assert.equal(h.toolCall("bash", "rm -rf /")?.block, true);
+    await h.tool("plan_propose");
+    assert.equal(h.toolCall("bash", "rm -rf /")?.block, true);
+
+    const implementation = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    implementation.start();
+    assert.equal(implementation.toolCall("bash", "rm -rf /"), undefined);
+});
+
+test("command completions follow the current phase", async () => {
+    const h = createHarness({ entries: [entry({ phase: "off", savedTools: FULL_TOOLS })] });
+    h.start();
+    assert.deepEqual(h.completions(), []);
+    await h.command();
+    assert.deepEqual(h.completions(), ["create", "disable"]);
+    await h.command("create");
+    assert.deepEqual(h.completions(), ["bstorm", "disable"]);
+    await h.command("bstorm");
+    assert.deepEqual(h.completions(), ["create", "disable"]);
+});
+
+test("create and bstorm commands enforce phase guards", async () => {
+    const h = createHarness();
+    h.start();
+    await h.command("bstorm");
+    assert.match(h.notes.at(-1) ?? "", /only in planning/i);
+    await h.command("create");
+    await h.command("create");
+    assert.match(h.notes.at(-1) ?? "", /only in brainstorming/i);
+});
+
+test("create remains a synthetic-message fallback", async () => {
+    const h = createHarness();
+    h.start();
+    await h.command("create");
+    assert.deepEqual(h.sent, ["Draft and submit the formal proposal."]);
+});
+
+test("disable is available only while plan mode is enabled", async () => {
+    const h = createHarness();
+    h.start();
+    await h.command("disable");
+    assert.equal(h.status, undefined);
+    assert.deepEqual(h.activeTools, FULL_TOOLS);
+    await h.command("disable");
+    assert.match(h.notes.at(-1) ?? "", /already disabled/i);
+});
+
+test("restores state from the active branch", () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+        branch: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    assert.equal(h.status, "plan: planning");
+});
+
+test("invalid control tool transition throws", async () => {
+    const h = createHarness();
+    h.start();
+    await assert.rejects(h.tool("plan_complete"), /implementing/i);
 });
