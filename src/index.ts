@@ -114,12 +114,12 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         return content;
     }
 
-    /** Formats the approved proposal for the implementation contract. */
+    /** Formats a proposal for approval recaps and the implementation contract. */
     function formatProposal(proposal: PlanProposal): string {
         const steps = proposal.steps
             .map((step, index) => `${index + 1}. ${step.title} — ${step.description}`)
             .join("\n");
-        return `Approved work: ${proposal.summary}\n${steps}`;
+        return `Proposed work: ${proposal.summary}\n${steps}`;
     }
 
     /** Requests approval for the currently stored proposal. */
@@ -131,6 +131,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 details: {},
             };
         }
+        ctx.ui.notify(formatProposal(data.proposal));
         const choice = await ctx.ui.select("Plan proposed — accept?", ["Implement now", "Back to brainstorming"]);
         if (choice === "Implement now") {
             transition(ctx, "implementing");

@@ -43,6 +43,8 @@ Implementation restores the tools captured when plan mode started and adds `plan
 
 The bash gate reduces accidental writes. It is not a security sandbox. Commands still run with the user's permissions, so install only extensions that you trust.
 
+The allowlist is a fixed list of command and subcommand names, not a general script runner. Package-manager scripts are blocked by default; `pnpm`/`npm` allow only `test`, `run typecheck`, `run format:check`, and `run lint`. Other scripts, including `pnpm format` and `pnpm install`, stay blocked in brainstorming and planning.
+
 ## State and prompts
 
 The current phase, structured proposal, and original tool snapshot persist on the active session branch. Invalid persisted data is normalized during startup.

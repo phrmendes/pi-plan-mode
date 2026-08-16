@@ -181,7 +181,7 @@ test("implementation prompt uses a compact proposal", () => {
     });
     h.start();
     const result = h.beforeAgentStart();
-    assert.match(result.systemPrompt, /Approved work: Improve flow/);
+    assert.match(result.systemPrompt, /Proposed work: Improve flow/);
     assert.match(result.systemPrompt, /Refactor — Use control tools/);
     assert.doesNotMatch(result.systemPrompt, /Change orchestration/);
 });
@@ -203,6 +203,15 @@ test("plan_submit approval enters persistent implementation", async () => {
     assert.equal(h.status, "plan: implementing");
     assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
+});
+
+test("plan_submit shows the formatted proposal before the approval prompt", async () => {
+    const h = createHarness({ choices: ["Implement now"] });
+    h.start();
+    await h.tool("plan_propose");
+    await h.tool("plan_submit", PROPOSAL);
+    assert.match(h.notes.at(-2) ?? "", /Proposed work: Improve flow/);
+    assert.match(h.notes.at(-2) ?? "", /Refactor — Use control tools/);
 });
 
 test("plan_submit stores a proposal without UI approval", async () => {

@@ -72,9 +72,10 @@ const SAFE_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
         "merge-base",
         "cherry",
     ]),
-    npm: new Set(["ls", "list", "view", "outdated"]),
-    pnpm: new Set(["list", "ls", "outdated"]),
+    npm: new Set(["ls", "list", "view", "outdated", "test", "run"]),
+    pnpm: new Set(["list", "ls", "outdated", "test", "run"]),
 };
+const SAFE_RUN_SCRIPTS = new Set(["test", "typecheck", "format:check", "lint"]);
 
 type ArgumentPolicy = (words: string[]) => boolean;
 
@@ -83,6 +84,8 @@ const argumentPolicies: Record<string, ArgumentPolicy> = {
     fd: (words) => words.every((word) => !FD_EXEC_FLAGS.has(word)),
     rg: (words) => words.every((word) => word !== "--pre" && !word.startsWith("--pre=")),
     git: (words) => words.every((word) => word !== "--ext-diff" && !word.startsWith("--output")),
+    npm: (words) => words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2])),
+    pnpm: (words) => words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2])),
 };
 
 /** Returns whether one command segment matches the inspection allowlist. */

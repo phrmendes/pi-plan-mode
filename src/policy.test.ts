@@ -2,7 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isAllowedInspectionCommand } from "./policy.ts";
 
-const allowed = ["git status", "git blame src/index.ts", "find . -name '*.ts'", "rg TODO src", "pnpm outdated"];
+const allowed = [
+    "git status",
+    "git blame src/index.ts",
+    "find . -name '*.ts'",
+    "rg TODO src",
+    "pnpm outdated",
+    "pnpm test",
+    "pnpm run typecheck",
+    "npm run typecheck",
+];
 const blocked = [
     "rm -rf /",
     "find . -delete",
@@ -11,6 +20,9 @@ const blocked = [
     "rg --pre=rm pattern",
     "git config key value",
     "git diff --output=result",
+    "pnpm format",
+    "pnpm run build",
+    "npm run release",
     "curl -X POST https://example.com",
     "echo $(whoami)",
     "cat file > copy",
