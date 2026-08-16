@@ -11,6 +11,9 @@ const allowed = [
     "pnpm test",
     "pnpm run typecheck",
     "npm run typecheck",
+    "wc -l src/*.test.ts",
+    "cat *.md",
+    "rg TODO src/*.ts",
 ];
 const blocked = [
     "rm -rf /",

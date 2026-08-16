@@ -107,6 +107,10 @@ export function isAllowedInspectionCommand(command: string): boolean {
                 segments.at(-1)!.push(token);
                 continue;
             }
+            if ("op" in token && token.op === "glob") {
+                segments.at(-1)!.push(token.pattern);
+                continue;
+            }
             if (!("op" in token) || !CHAIN_OPERATORS.has(token.op)) return false;
             segments.push([]);
         }
