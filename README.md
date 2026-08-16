@@ -16,6 +16,7 @@ stateDiagram-v2
 The agent normally advances the workflow through typed control tools:
 
 - `plan_propose` enters planning after the user requests a proposal.
+- `plan_ask` asks the user one or more multiple-choice clarifying questions, with a free-text "Other" fallback, in brainstorming and planning.
 - `plan_submit` sends a full PRD (problem, goals, requirements, files, steps, success criteria) for approval.
 - `plan_approve` reopens approval for a stored proposal without resubmission.
 - `plan_complete` ends implementation after all work is verified.

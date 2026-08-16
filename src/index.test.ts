@@ -48,6 +48,7 @@ interface HarnessOptions {
     branch?: Entry[];
     tools?: string[];
     choices?: (string | undefined)[];
+    inputs?: (string | undefined)[];
     hasUI?: boolean;
     loadPrompt?: (phase: string) => string | null;
     rejectStartupActions?: boolean;
@@ -69,6 +70,7 @@ function createHarness(options: HarnessOptions = {}) {
     let status: string | undefined;
     let setActiveToolsCalls = 0;
     let selectCalls = 0;
+    let inputCalls = 0;
     let started = false;
 
     const pi = {
@@ -94,6 +96,10 @@ function createHarness(options: HarnessOptions = {}) {
             select: async () => {
                 selectCalls++;
                 return (options.choices ?? []).shift();
+            },
+            input: async () => {
+                inputCalls++;
+                return (options.inputs ?? []).shift();
             },
         },
         sessionManager: {
@@ -141,6 +147,9 @@ function createHarness(options: HarnessOptions = {}) {
         get selectCalls() {
             return selectCalls;
         },
+        get inputCalls() {
+            return inputCalls;
+        },
     };
 }
 
@@ -154,7 +163,7 @@ test("fresh session enters brainstorming with the agent transition tool", () => 
     const h = createHarness();
     h.start();
     assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose"]);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose", "plan_ask"]);
 });
 
 test("restored off state does not change tools", () => {
@@ -198,7 +207,7 @@ test("plan_propose enters planning without a synthetic user message", async () =
     h.start();
     await h.tool("plan_propose");
     assert.equal(h.status, "plan: planning");
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit"]);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_ask"]);
     assert.deepEqual(h.sent, []);
 });
 
@@ -220,13 +229,12 @@ test("approving a proposal immediately nudges the agent to implement", async () 
     assert.deepEqual(h.sent, ["Begin implementation now."]);
 });
 
-test("plan_submit shows the formatted proposal before the approval prompt", async () => {
+test("plan_submit does not repeat the PRD in a notify toast", async () => {
     const h = createHarness({ choices: ["Implement now"] });
     h.start();
     await h.tool("plan_propose");
     await h.tool("plan_submit", PROPOSAL);
-    assert.match(h.notes.at(-2) ?? "", /# Improve flow/);
-    assert.match(h.notes.at(-2) ?? "", /Refactor — Use control tools/);
+    assert.ok(h.notes.every((note) => !note.includes("# Improve flow")));
 });
 
 test("plan_submit stores a proposal without UI approval", async () => {
@@ -237,7 +245,7 @@ test("plan_submit stores a proposal without UI approval", async () => {
     assert.equal(h.status, "plan: planning");
     assert.equal(h.selectCalls, 0);
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_approve"]);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_ask", "plan_approve"]);
 });
 
 test("plan_approve approves a stored proposal without resubmission", async () => {
@@ -248,6 +256,16 @@ test("plan_approve approves a stored proposal without resubmission", async () =>
     h.start();
     await h.tool("plan_approve");
     assert.equal(h.status, "plan: implementing");
+});
+
+test("plan_approve shows the full PRD since there is no preceding chat message", async () => {
+    const h = createHarness({
+        choices: ["Implement now"],
+        entries: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.tool("plan_approve");
+    assert.ok(h.notes.some((note) => note.includes("# Improve flow") && note.includes("Refactor — Use control tools")));
 });
 
 test("rejected proposal reports the actual outcome", async () => {
@@ -267,7 +285,7 @@ test("plan_complete returns to brainstorming and clears the proposal", async () 
     await h.tool("plan_complete");
     assert.equal(h.status, "plan: brainstorming");
     assert.equal(h.appended.at(-1)?.proposal, undefined);
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose"]);
+    assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose", "plan_ask"]);
 });
 
 test("implementation remains active across agent lifecycle events", async () => {
@@ -366,4 +384,59 @@ test("invalid control tool transition throws", async () => {
     const h = createHarness();
     h.start();
     await assert.rejects(h.tool("plan_complete"), /implementing/i);
+});
+
+test("plan_ask is available in brainstorming and planning but not implementing", async () => {
+    const h = createHarness();
+    h.start();
+    assert.ok(h.activeTools.includes("plan_ask"));
+    await h.tool("plan_propose");
+    assert.ok(h.activeTools.includes("plan_ask"));
+
+    const implementation = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    implementation.start();
+    assert.ok(!implementation.activeTools.includes("plan_ask"));
+    await assert.rejects(
+        implementation.tool("plan_ask", { questions: [{ question: "q", options: ["a"] }] }),
+        /brainstorming or planning/i,
+    );
+});
+
+test("plan_ask returns a selected option as the answer", async () => {
+    const h = createHarness({ choices: ["Blue"] });
+    h.start();
+    const result = await h.tool("plan_ask", { questions: [{ question: "Favorite color?", options: ["Blue", "Red"] }] });
+    assert.match(result.content[0].text, /Q: Favorite color\?\nA: Blue/);
+    assert.equal(h.inputCalls, 0);
+});
+
+test("plan_ask falls back to free text when the user picks Other", async () => {
+    const h = createHarness({ choices: ["Other (type your own)"], inputs: ["Green"] });
+    h.start();
+    const result = await h.tool("plan_ask", { questions: [{ question: "Favorite color?", options: ["Blue", "Red"] }] });
+    assert.match(result.content[0].text, /Q: Favorite color\?\nA: Green/);
+    assert.equal(h.inputCalls, 1);
+});
+
+test("plan_ask asks every question and joins the answers", async () => {
+    const h = createHarness({ choices: ["Blue", "Red"] });
+    h.start();
+    const result = await h.tool("plan_ask", {
+        questions: [
+            { question: "Favorite color?", options: ["Blue", "Green"] },
+            { question: "Favorite fruit?", options: ["Red", "Yellow"] },
+        ],
+    });
+    assert.match(result.content[0].text, /Q: Favorite color\?\nA: Blue\n\nQ: Favorite fruit\?\nA: Red/);
+});
+
+test("plan_ask degrades gracefully without a UI", async () => {
+    const h = createHarness({ hasUI: false });
+    h.start();
+    const result = await h.tool("plan_ask", { questions: [{ question: "q", options: ["a"] }] });
+    assert.match(result.content[0].text, /require a UI session/i);
+    assert.equal(h.selectCalls, 0);
+    assert.equal(h.inputCalls, 0);
 });

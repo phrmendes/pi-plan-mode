@@ -10,8 +10,18 @@ import {
     type PlanState,
 } from "./state.ts";
 
-const CONTROL_TOOLS = new Set(["plan_propose", "plan_submit", "plan_approve", "plan_complete"]);
+const CONTROL_TOOLS = new Set(["plan_propose", "plan_submit", "plan_approve", "plan_complete", "plan_ask"]);
 const READ_ONLY_TOOLS = new Set(["read", "bash"]);
+const ASK_OTHER_OPTION = "Other (type your own)";
+const PLAN_ASK_SCHEMA = Type.Object({
+    questions: Type.Array(
+        Type.Object({
+            question: Type.String({ minLength: 1 }),
+            options: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+        }),
+        { minItems: 1 },
+    ),
+});
 const PHASES: Record<
     PlanState,
     { readOnly: boolean; controls: string[]; commands: Array<{ value: string; label: string }> }
@@ -19,7 +29,7 @@ const PHASES: Record<
     off: { readOnly: false, controls: [], commands: [] },
     brainstorming: {
         readOnly: true,
-        controls: ["plan_propose"],
+        controls: ["plan_propose", "plan_ask"],
         commands: [
             { value: "create", label: "create — enter planning" },
             { value: "disable", label: "disable — exit plan mode" },
@@ -27,7 +37,7 @@ const PHASES: Record<
     },
     planning: {
         readOnly: true,
-        controls: ["plan_submit"],
+        controls: ["plan_submit", "plan_ask"],
         commands: [
             { value: "bstorm", label: "bstorm — return to brainstorming" },
             { value: "disable", label: "disable — exit plan mode" },
@@ -96,6 +106,24 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         if (data.phase !== expected) throw new Error(`This action is available only in ${expected} mode.`);
     }
 
+    /** Throws when a control tool is called outside one of its allowed phases. */
+    function requireAnyPhase(expected: PlanState[]): void {
+        if (!expected.includes(data.phase))
+            throw new Error(`This action is available only in ${expected.join(" or ")} mode.`);
+    }
+
+    /** Asks one clarifying question, falling back to free text for a custom answer. */
+    async function askQuestion(
+        ctx: ExtensionContext,
+        question: string,
+        options: string[],
+    ): Promise<{ question: string; answer: string }> {
+        const choice = await ctx.ui.select(question, [...options, ASK_OTHER_OPTION]);
+        if (choice !== undefined && choice !== ASK_OTHER_OPTION) return { question, answer: choice };
+        const custom = await ctx.ui.input("Your answer:");
+        return { question, answer: custom && custom.trim().length > 0 ? custom.trim() : "No answer provided" };
+    }
+
     /** Reads one bundled phase prompt. */
     function readBundledPrompt(phase: PlanState): string | null {
         try {
@@ -140,7 +168,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     }
 
     /** Requests approval for the currently stored proposal. */
-    async function approveProposal(ctx: ExtensionContext) {
+    async function approveProposal(ctx: ExtensionContext, showRecap: boolean) {
         if (!data.proposal) throw new Error("No stored proposal is available.");
         if (!ctx.hasUI) {
             return {
@@ -148,8 +176,9 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 details: {},
             };
         }
-        ctx.ui.notify(formatProposal(data.proposal));
-        const choice = await ctx.ui.select("Plan proposed — accept?", ["Implement now", "Back to brainstorming"]);
+        const prompt = showRecap ? "Plan proposed — accept?" : "Plan proposed above — accept?";
+        if (showRecap) ctx.ui.notify(formatProposal(data.proposal));
+        const choice = await ctx.ui.select(prompt, ["Implement now", "Back to brainstorming"]);
         if (choice === "Implement now") {
             transition(ctx, "implementing");
             pi.sendUserMessage("Begin implementation now.", { deliverAs: "followUp" });
@@ -197,7 +226,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
             data.proposal = params;
             persistState();
             pi.setActiveTools(toolsFor("planning"));
-            return approveProposal(ctx);
+            return approveProposal(ctx, false);
         },
     });
 
@@ -208,7 +237,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         parameters: Type.Object({}),
         async execute(_id, _params, _signal, _update, ctx) {
             requirePhase("planning");
-            return approveProposal(ctx);
+            return approveProposal(ctx, true);
         },
     });
 
@@ -228,6 +257,32 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 content: [{ type: "text" as const, text: "Implementation complete. Brainstorming restored." }],
                 details: {},
             };
+        },
+    });
+
+    pi.registerTool({
+        name: "plan_ask",
+        label: "Ask Clarifying Questions",
+        description:
+            "Ask the user one or more multiple-choice clarifying questions before proposing or submitting work",
+        parameters: PLAN_ASK_SCHEMA,
+        async execute(_id, params, _signal, _update, ctx) {
+            requireAnyPhase(["brainstorming", "planning"]);
+            if (!ctx.hasUI) {
+                return {
+                    content: [
+                        {
+                            type: "text" as const,
+                            text: "Clarifying questions require a UI session; none is available.",
+                        },
+                    ],
+                    details: {},
+                };
+            }
+            const answers: Array<{ question: string; answer: string }> = [];
+            for (const item of params.questions) answers.push(await askQuestion(ctx, item.question, item.options));
+            const text = answers.map((entry) => `Q: ${entry.question}\nA: ${entry.answer}`).join("\n\n");
+            return { content: [{ type: "text" as const, text }], details: {} };
         },
     });
 
