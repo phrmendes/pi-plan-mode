@@ -266,6 +266,10 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 ctx.ui.notify("Plan mode is already disabled.", "warning");
                 return;
             }
+            if (activeImplementationTools.size > 0) {
+                ctx.ui.notify("Plan mode: wait for implementation tools to finish before disabling.", "warning");
+                return;
+            }
             transition(ctx, "off");
         },
     };

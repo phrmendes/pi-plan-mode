@@ -342,6 +342,20 @@ test("disable is available only while plan mode is enabled", async () => {
     assert.match(h.notes.at(-1) ?? "", /already disabled/i);
 });
 
+test("disable is blocked while implementation tools are in flight", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit" });
+    await h.command("disable");
+    assert.equal(h.status, "plan: implementing");
+    assert.match(h.notes.at(-1) ?? "", /wait for implementation tools/i);
+    await h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
+    await h.command("disable");
+    assert.equal(h.status, undefined);
+});
+
 test("restores state from the active branch", () => {
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
