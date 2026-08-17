@@ -178,7 +178,6 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         ]);
         if (choice === "Approve and implement") {
             transition(ctx, "implementing");
-            pi.sendUserMessage("Begin implementation now.", { deliverAs: "followUp" });
             return {
                 content: [{ type: "text" as const, text: "Proposal approved. Begin implementation." }],
                 details: {},

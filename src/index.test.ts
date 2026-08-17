@@ -227,7 +227,7 @@ test("plan_propose shows one canonical proposal and enters implementation after 
     assert.equal(h.displayEntriesAtSelect, 1);
     assert.ok(h.notes.every((note) => !note.includes("# Improve flow")));
     assert.ok(h.entryRenderers.has("plan-proposal"));
-    assert.deepEqual(h.sent, ["Begin implementation now."]);
+    assert.deepEqual(h.sent, []);
 });
 
 test("plan_propose stores and returns the formatted proposal without UI", async () => {
