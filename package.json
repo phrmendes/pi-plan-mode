@@ -13,7 +13,8 @@
         "!src/*.test.ts"
     ],
     "scripts": {
-        "test": "node --test src/*.test.ts",
+        "test": "node --test src/index.test.ts src/policy.test.ts src/state.test.ts",
+        "test:e2e": "node --test src/e2e.test.ts",
         "typecheck": "tsc -p tsconfig.json",
         "format": "prettier --write src/",
         "format:check": "prettier --check src/",
@@ -26,6 +27,7 @@
         "typebox": "^1.3.14"
     },
     "devDependencies": {
+        "@earendil-works/pi-ai": "0.84.2",
         "@earendil-works/pi-coding-agent": "0.84.0",
         "prettier": "^3.9.6",
         "typescript": "latest"
