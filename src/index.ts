@@ -57,6 +57,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     const promptCache = new Map<PlanState, string>();
     const promptFailures = new Set<PlanState>();
     const activeImplementationTools = new Set<string>();
+    let hasNudgedForProposal = false;
 
     pi.registerEntryRenderer("plan-proposal", (entry) => {
         const proposal = entry.data as { markdown: string };
@@ -84,6 +85,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     function transition(ctx: ExtensionContext, next: PlanState): void {
         if (data.phase === next) return;
         if (data.phase === "off" && next !== "off") data.savedTools = baseTools();
+        if (next === "implementing") hasNudgedForProposal = false;
         data.phase = next;
         if (next === "off") {
             data.proposal = undefined;
@@ -312,6 +314,15 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
 
     pi.on("tool_execution_end", (event) => {
         activeImplementationTools.delete(event.toolCallId);
+    });
+
+    pi.on("agent_settled", () => {
+        if (data.phase !== "implementing" || !data.proposal) return;
+        if (activeImplementationTools.size > 0 || hasNudgedForProposal) return;
+        hasNudgedForProposal = true;
+        pi.sendUserMessage(
+            "If every acceptance criterion is verified, call plan_complete now. If not, continue implementing.",
+        );
     });
 
     pi.on("before_agent_start", (event, ctx) => {

@@ -177,6 +177,14 @@ test("fresh session enters brainstorming with the agent transition tool", () => 
     assert.deepEqual(h.activeTools, ["read", "bash", "plan_propose", "plan_ask"]);
 });
 
+test("fresh session snapshots the complete active tool set, not a partial one", async () => {
+    const dynamicTools = [...FULL_TOOLS, "dynamic-tool"];
+    const h = createHarness({ tools: dynamicTools, choices: ["Approve and implement"] });
+    h.start();
+    await h.tool("plan_propose", PROPOSAL);
+    assert.deepEqual(h.activeTools, [...dynamicTools, "plan_complete"]);
+});
+
 test("restored off state does not change tools", () => {
     const h = createHarness({
         entries: [entry({ phase: "off", savedTools: FULL_TOOLS })],
@@ -287,6 +295,46 @@ test("implementation remains active across agent lifecycle events", async () => 
     assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
 });
 
+test("agent_settled reminds the agent to call plan_complete once, when idle mid-implementation", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("agent_settled");
+    assert.deepEqual(h.sent, [
+        "If every acceptance criterion is verified, call plan_complete now. If not, continue implementing.",
+    ]);
+    await h.emit("agent_settled");
+    assert.equal(h.sent.length, 1);
+});
+
+test("agent_settled does not remind while implementation tools are in flight", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit" });
+    await h.emit("agent_settled");
+    assert.deepEqual(h.sent, []);
+    await h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
+    await h.emit("agent_settled");
+    assert.equal(h.sent.length, 1);
+});
+
+test("agent_settled reminder resets after a new proposal is approved", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+        choices: ["Approve and implement"],
+    });
+    h.start();
+    await h.emit("agent_settled");
+    assert.equal(h.sent.length, 1);
+    await h.tool("plan_complete");
+    await h.tool("plan_propose", PROPOSAL);
+    await h.emit("agent_settled");
+    assert.equal(h.sent.length, 2);
+});
+
 test("plan_complete waits for implementation tools to finish", async () => {
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
@@ -295,6 +343,21 @@ test("plan_complete waits for implementation tools to finish", async () => {
     await h.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit" });
     await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
     await h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
+    await h.tool("plan_complete");
+    assert.equal(h.status, "plan: brainstorming");
+});
+
+test("plan_complete stays blocked while multiple implementation tools are in flight", async () => {
+    const h = createHarness({
+        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    });
+    h.start();
+    await h.emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit" });
+    await h.emit("tool_execution_start", { toolCallId: "write-1", toolName: "write" });
+    await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
+    await h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
+    await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
+    await h.emit("tool_execution_end", { toolCallId: "write-1", toolName: "write" });
     await h.tool("plan_complete");
     assert.equal(h.status, "plan: brainstorming");
 });
