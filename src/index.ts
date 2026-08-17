@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { isAllowedInspectionCommand } from "./policy.ts";
@@ -56,6 +57,11 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     const promptCache = new Map<PlanState, string>();
     const promptFailures = new Set<PlanState>();
     const activeImplementationTools = new Set<string>();
+
+    pi.registerEntryRenderer("plan-proposal", (entry) => {
+        const proposal = entry.data as { markdown: string };
+        return new Markdown(proposal.markdown, 0, 0, getMarkdownTheme());
+    });
 
     /** Persists the durable workflow state. */
     function persistState(): void {
@@ -164,7 +170,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 details: {},
             };
         }
-        ctx.ui.notify(markdown);
+        pi.appendEntry("plan-proposal", { markdown });
         const choice = await ctx.ui.select("Review the proposal above", [
             "Approve and implement",
             "Request revision",

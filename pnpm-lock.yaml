@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@earendil-works/pi-tui':
+        specifier: 0.84.2
+        version: 0.84.2
       shell-quote:
         specifier: ^1.8.4
         version: 1.10.0

@@ -18,7 +18,7 @@ The agent uses three control tools:
 - `plan_propose` submits one complete engineering proposal for review and approval.
 - `plan_complete` ends implementation after all work and verification finish.
 
-The agent submits structured proposal data once. The extension stores it, formats it as Markdown, shows the complete proposal, and asks the user to approve, revise, or keep it for later. Approval immediately queues implementation without another user message.
+The agent submits structured proposal data once. The extension stores it, formats it as normal Markdown in the conversation transcript, and then asks the user to approve, revise, or keep it for later. The display entry does not enter model context. Approval immediately queues implementation without another user message.
 
 A brief PRD covers the problem, outcome, approach, concrete file or area changes, and acceptance criteria.
 
@@ -34,7 +34,7 @@ Invalid transitions are rejected. `/plan review` reports when no proposal is sto
 
 ## Proposal review
 
-The extension renders proposals in a stable Markdown order:
+The extension renders proposals as normal transcript Markdown, separate from the approval selector, in this stable order:
 
 1. Problem
 2. Outcome

@@ -61,7 +61,9 @@ function createHarness(options: HarnessOptions = {}) {
     const events = new Map<string, EventHandler>();
     const commands = new Map<string, RegisteredCommand>();
     const tools = new Map<string, RegisteredTool>();
+    const entryRenderers = new Map<string, unknown>();
     const appended: PlanModeData[] = [];
+    const displayEntries: unknown[] = [];
     const sent: string[] = [];
     const notes: string[] = [];
     let activeTools = options.tools ?? [...FULL_TOOLS];
@@ -69,13 +71,18 @@ function createHarness(options: HarnessOptions = {}) {
     let setActiveToolsCalls = 0;
     let selectCalls = 0;
     let inputCalls = 0;
+    let displayEntriesAtSelect = 0;
     let started = false;
 
     const pi = {
         registerCommand: (name: string, definition: RegisteredCommand) => void commands.set(name, definition),
         registerTool: (definition: RegisteredTool) => void tools.set(definition.name, definition),
+        registerEntryRenderer: (type: string, renderer: unknown) => void entryRenderers.set(type, renderer),
         on: (name: string, handler: EventHandler) => void events.set(name, handler),
-        appendEntry: (_type: string, value: PlanModeData) => void appended.push(value),
+        appendEntry: (type: string, value: PlanModeData) => {
+            if (type === "plan-mode") appended.push(value);
+            else displayEntries.push(value);
+        },
         sendUserMessage: (message: string) => void sent.push(message),
         getActiveTools: () => {
             if (options.rejectStartupActions && !started) throw new Error("Extension runtime not initialized");
@@ -93,6 +100,7 @@ function createHarness(options: HarnessOptions = {}) {
             notify: (message: string) => void notes.push(message),
             select: async () => {
                 selectCalls++;
+                displayEntriesAtSelect = displayEntries.length;
                 return (options.choices ?? []).shift();
             },
             input: async () => {
@@ -110,6 +118,8 @@ function createHarness(options: HarnessOptions = {}) {
 
     return {
         appended,
+        displayEntries,
+        entryRenderers,
         sent,
         notes,
         start: () => {
@@ -147,6 +157,9 @@ function createHarness(options: HarnessOptions = {}) {
         },
         get inputCalls() {
             return inputCalls;
+        },
+        get displayEntriesAtSelect() {
+            return displayEntriesAtSelect;
         },
     };
 }
@@ -207,7 +220,13 @@ test("plan_propose shows one canonical proposal and enters implementation after 
     assert.equal(h.status, "plan: implementing");
     assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
-    assert.ok(h.notes.some((note) => note.includes("# Improve flow") && note.includes("Transition tests pass")));
+    assert.equal(h.displayEntries.length, 1);
+    const display = h.displayEntries[0] as { markdown: string };
+    assert.match(display.markdown, /# Improve flow/);
+    assert.match(display.markdown, /Transition tests pass/);
+    assert.equal(h.displayEntriesAtSelect, 1);
+    assert.ok(h.notes.every((note) => !note.includes("# Improve flow")));
+    assert.ok(h.entryRenderers.has("plan-proposal"));
     assert.deepEqual(h.sent, ["Begin implementation now."]);
 });
 
@@ -326,7 +345,10 @@ test("disable is available only while plan mode is enabled", async () => {
 test("restores state from the active branch", () => {
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-        branch: [entry({ phase: "brainstorming", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+        branch: [
+            entry({ phase: "brainstorming", proposal: PROPOSAL, savedTools: FULL_TOOLS }),
+            { type: "custom", customType: "plan-proposal", data: { markdown: "# Display only" } },
+        ],
     });
     h.start();
     assert.equal(h.status, "plan: brainstorming");

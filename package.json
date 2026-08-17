@@ -21,6 +21,7 @@
         "pack:check": "rm -rf /tmp/pi-plan-mode-pack && mkdir -p /tmp/pi-plan-mode-pack && pnpm pack --pack-destination /tmp/pi-plan-mode-pack && tar -tf /tmp/pi-plan-mode-pack/*.tgz"
     },
     "dependencies": {
+        "@earendil-works/pi-tui": "0.84.2",
         "shell-quote": "^1.8.4",
         "typebox": "^1.3.14"
     },
