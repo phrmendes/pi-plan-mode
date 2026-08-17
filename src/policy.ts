@@ -81,7 +81,10 @@ type ArgumentPolicy = (words: string[]) => boolean;
 
 const argumentPolicies: Record<string, ArgumentPolicy> = {
     find: (words) => words.every((word) => !FIND_WRITE_FLAGS.has(word)),
-    fd: (words) => words.every((word) => !FD_EXEC_FLAGS.has(word)),
+    fd: (words) =>
+        words.every(
+            (word) => !FD_EXEC_FLAGS.has(word) && !word.startsWith("--exec=") && !word.startsWith("--exec-batch="),
+        ),
     rg: (words) => words.every((word) => word !== "--pre" && !word.startsWith("--pre=")),
     git: (words) => words.every((word) => word !== "--ext-diff" && !word.startsWith("--output")),
     npm: (words) => words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2])),
