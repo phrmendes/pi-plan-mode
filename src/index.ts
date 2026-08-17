@@ -3,13 +3,8 @@ import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { isAllowedInspectionCommand } from "./policy.ts";
-import {
-    normalizePlanModeData,
-    PLAN_PROPOSAL_SCHEMA,
-    type PlanModeData,
-    type PlanProposal,
-    type PlanState,
-} from "./state.ts";
+import { formatProposal, requireCompleteProposal } from "./proposal.ts";
+import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanState } from "./state.ts";
 
 const CONTROL_TOOLS = new Set(["plan_propose", "plan_complete", "plan_ask"]);
 const READ_ONLY_TOOLS = new Set(["read", "bash"]);
@@ -103,6 +98,11 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         if (data.phase !== expected) throw new Error(`This action is available only in ${expected} mode.`);
     }
 
+    /** Returns whether an implementation tool call is still executing. */
+    function hasToolsInFlight(): boolean {
+        return activeImplementationTools.size > 0;
+    }
+
     /** Asks one clarifying question, falling back to free text for a custom answer. */
     async function askQuestion(
         ctx: ExtensionContext,
@@ -131,33 +131,6 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         const content = (options.loadPrompt ?? readBundledPrompt)(phase);
         if (content) promptCache.set(phase, content);
         return content;
-    }
-
-    /** Renders a bullet list, or omits the section entirely when the list is empty. */
-    function bulletSection(heading: string, items?: string[]): string {
-        if (!items || items.length === 0) return "";
-        return `\n\n## ${heading}\n${items.map((item) => `- ${item}`).join("\n")}`;
-    }
-
-    /** Rejects placeholder text that cannot support an informed approval. */
-    function requireCompleteProposal(proposal: PlanProposal): void {
-        const content = JSON.stringify(proposal);
-        if (/\b(?:tbd|todo|etc\.?|as needed|unknown)\b/i.test(content)) {
-            throw new Error("The proposal contains placeholder content. Resolve it before proposing.");
-        }
-    }
-
-    /** Formats the canonical engineering proposal for review and implementation. */
-    function formatProposal(proposal: PlanProposal): string {
-        const changes = proposal.changes.map((item) => `- \`${item.path}\` — ${item.change}`).join("\n");
-        return (
-            `# ${proposal.title}` +
-            `\n\n## Problem\n${proposal.problem}` +
-            `\n\n## Outcome\n${proposal.outcome}` +
-            `\n\n## Approach\n${proposal.approach}` +
-            `\n\n## Changes\n${changes}` +
-            bulletSection("Acceptance Criteria", proposal.acceptanceCriteria)
-        );
     }
 
     /** Shows the stored proposal and requests a user decision. */
@@ -217,7 +190,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         parameters: Type.Object({}),
         async execute(_id, _params, _signal, _update, ctx) {
             requirePhase("implementing");
-            if (activeImplementationTools.size > 0) {
+            if (hasToolsInFlight()) {
                 throw new Error("plan_complete must run after all implementation tools finish.");
             }
             data.proposal = undefined;
@@ -268,7 +241,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 ctx.ui.notify("Plan mode is already disabled.", "warning");
                 return;
             }
-            if (activeImplementationTools.size > 0) {
+            if (hasToolsInFlight()) {
                 ctx.ui.notify("Plan mode: wait for implementation tools to finish before disabling.", "warning");
                 return;
             }
@@ -318,7 +291,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
 
     pi.on("agent_settled", () => {
         if (data.phase !== "implementing" || !data.proposal) return;
-        if (activeImplementationTools.size > 0 || hasNudgedForProposal) return;
+        if (hasToolsInFlight() || hasNudgedForProposal) return;
         hasNudgedForProposal = true;
         pi.sendUserMessage(
             "If every acceptance criterion is verified, call plan_complete now. If not, continue implementing.",

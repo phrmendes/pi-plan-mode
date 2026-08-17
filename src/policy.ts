@@ -79,6 +79,11 @@ const SAFE_RUN_SCRIPTS = new Set(["test", "typecheck", "format:check", "lint"]);
 
 type ArgumentPolicy = (words: string[]) => boolean;
 
+/** Returns whether an `npm`/`pnpm run` invocation only targets a known-safe script. */
+function isSafeRunInvocation(words: string[]): boolean {
+    return words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2]));
+}
+
 const argumentPolicies: Record<string, ArgumentPolicy> = {
     find: (words) => words.every((word) => !FIND_WRITE_FLAGS.has(word)),
     fd: (words) =>
@@ -87,8 +92,8 @@ const argumentPolicies: Record<string, ArgumentPolicy> = {
         ),
     rg: (words) => words.every((word) => word !== "--pre" && !word.startsWith("--pre=")),
     git: (words) => words.every((word) => word !== "--ext-diff" && !word.startsWith("--output")),
-    npm: (words) => words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2])),
-    pnpm: (words) => words[1] !== "run" || (words.length === 3 && SAFE_RUN_SCRIPTS.has(words[2])),
+    npm: isSafeRunInvocation,
+    pnpm: isSafeRunInvocation,
 };
 
 /** Returns whether one command segment matches the inspection allowlist. */

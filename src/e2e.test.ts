@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
     createAgentSession,
     DefaultResourceLoader,
-    getAgentDir,
     SessionManager,
     type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -28,9 +30,11 @@ async function createFakeModelSession(sessionManager: SessionManager) {
         pi.registerProvider(faux.provider);
     };
 
+    // Use a scratch agent dir, not getAgentDir(), so the test only loads the local extension under
+    // test and never a real globally-installed copy of this same package.
     const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
-        agentDir: getAgentDir(),
+        agentDir: mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-")),
         extensionFactories: [planMode, fauxProviderExtension],
     });
     await resourceLoader.reload();
@@ -93,24 +97,25 @@ test(
             fauxAssistantMessage("Acknowledged.", { stopReason: "stop" }),
         ]);
 
-        let settledCount = 0;
-        const waitForSettled = (count: number) =>
-            new Promise<void>((resolve) => {
-                const unsubscribe = session.subscribe((event) => {
-                    if (event.type !== "agent_settled") return;
-                    settledCount++;
-                    if (settledCount >= count) {
-                        unsubscribe();
-                        resolve();
-                    }
-                });
+        // The reminder fires asynchronously after the first turn settles, so wait for its effect
+        // (plan_complete reverting the phase) rather than for a specific count of framework events.
+        const phaseRevertedToBrainstorming = new Promise<void>((resolve) => {
+            if (lastPlanModeEntry(sessionManager)?.phase === "brainstorming") {
+                resolve();
+                return;
+            }
+            const unsubscribe = session.subscribe((event) => {
+                if (event.type !== "entry_appended") return;
+                if (lastPlanModeEntry(sessionManager)?.phase !== "brainstorming") return;
+                unsubscribe();
+                resolve();
             });
+        });
 
-        const settled = waitForSettled(2);
         await session.prompt("Implement the approved proposal.");
-        await settled;
+        await phaseRevertedToBrainstorming;
 
-        assert.equal(faux.state.callCount, 3, "the reminder should have triggered a second model turn");
+        assert.ok(faux.state.callCount >= 2, "the reminder should have triggered a second model turn");
         assert.equal(lastPlanModeEntry(sessionManager)?.phase, "brainstorming");
 
         session.dispose();
