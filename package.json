@@ -1,7 +1,7 @@
 {
     "name": "@phrmendes/pi-plan-mode",
     "version": "1.0.0",
-    "description": "Plan mode for the pi coding agent: gated brainstorming, plan proposals with an approval dialog, and time-boxed implementation windows",
+    "description": "Plan mode for pi: restricted discovery, structured proposal review, and durable implementation sessions",
     "license": "Apache-2.0",
     "type": "module",
     "keywords": [

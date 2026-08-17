@@ -4,13 +4,11 @@ import { normalizePlanModeData, type PlanProposal } from "./state.ts";
 
 const PROPOSAL: PlanProposal = {
     title: "Improve flow",
-    summary: "Improve flow",
-    problem: "The flow is hard to follow",
-    goals: ["Clarify orchestration"],
-    requirements: ["Use control tools"],
-    files: [{ path: "src/index.ts", reason: "Change orchestration" }],
-    steps: [{ title: "Refactor", description: "Use control tools" }],
-    successCriteria: ["Orchestration reads clearly"],
+    problem: "The current proposal flow is hard to follow.",
+    outcome: "Agents submit one complete engineering proposal.",
+    approach: "Combine proposal submission and approval into one control tool.",
+    changes: [{ path: "src/index.ts", change: "Simplify proposal orchestration and remove duplicate steps" }],
+    acceptanceCriteria: ["One proposal call opens approval"],
 };
 
 test("normalizes current persisted state", () => {
@@ -34,28 +32,38 @@ test("removes malformed structured proposals", () => {
     assert.equal(data.proposal, undefined);
 });
 
-test("removes proposals missing required PRD sections", () => {
-    const { title, ...withoutTitle } = PROPOSAL;
-    const data = normalizePlanModeData({ phase: "planning", proposal: withoutTitle, savedTools: ["read"] }, ["read"]);
+test("removes proposals missing required brief PRD sections", () => {
+    const { approach, ...withoutApproach } = PROPOSAL;
+    const data = normalizePlanModeData({ phase: "planning", proposal: withoutApproach, savedTools: ["read"] }, [
+        "read",
+    ]);
     assert.equal(data.proposal, undefined);
 });
 
-test("keeps optional PRD sections when present and omits them otherwise", () => {
-    const withOptional = normalizePlanModeData(
+test("preserves a pending proposal in brainstorming", () => {
+    const data = normalizePlanModeData({ phase: "brainstorming", proposal: PROPOSAL, savedTools: ["read"] }, ["read"]);
+    assert.deepEqual(data.proposal, PROPOSAL);
+});
+
+test("migrates an old planning proposal without file entries", () => {
+    const data = normalizePlanModeData(
         {
             phase: "planning",
-            proposal: { ...PROPOSAL, nonGoals: ["Rewrite unrelated modules"], risks: ["Scope creep"] },
-            savedTools: ["read"],
+            proposal: {
+                title: "Legacy plan",
+                summary: "Complete legacy work",
+                problem: "The old workflow needs migration",
+                goals: ["Preserve the plan"],
+                requirements: ["Keep the approved scope"],
+                files: [],
+                steps: [{ title: "Migrate", description: "Run migration tests" }],
+                successCriteria: ["The proposal is preserved"],
+            },
         },
         ["read"],
     );
-    assert.deepEqual(withOptional.proposal?.nonGoals, ["Rewrite unrelated modules"]);
-    assert.deepEqual(withOptional.proposal?.risks, ["Scope creep"]);
-    const withoutOptional = normalizePlanModeData({ phase: "planning", proposal: PROPOSAL, savedTools: ["read"] }, [
-        "read",
-    ]);
-    assert.equal(withoutOptional.proposal?.nonGoals, undefined);
-    assert.equal(withoutOptional.proposal?.risks, undefined);
+    assert.equal(data.phase, "brainstorming");
+    assert.equal(data.proposal?.changes.length, 1);
 });
 
 test("migrates legacy steps into a structured proposal", () => {
@@ -63,21 +71,17 @@ test("migrates legacy steps into a structured proposal", () => {
         "read",
         "bash",
     ]);
-    assert.deepEqual(data.proposal, {
-        title: "Restored legacy proposal",
-        summary: "Restored legacy proposal",
-        problem: "Restored from a legacy proposal without a recorded problem statement.",
-        goals: ["Restore prior legacy work items"],
-        requirements: ["Legacy task"],
-        files: [],
-        steps: [{ title: "Legacy task", description: "" }],
-        successCriteria: ["All restored steps are completed"],
-    });
+    assert.equal(data.proposal?.title, "Restored legacy proposal");
+    assert.equal(data.proposal?.approach, "Legacy task");
 });
 
 test("normalizes workflow invariants", () => {
     assert.equal(normalizePlanModeData({ phase: "off", proposal: PROPOSAL }, ["read"]).proposal, undefined);
-    assert.equal(normalizePlanModeData({ phase: "brainstorming", proposal: PROPOSAL }, ["read"]).proposal, undefined);
+    assert.deepEqual(
+        normalizePlanModeData({ phase: "brainstorming", proposal: PROPOSAL }, ["read"]).proposal,
+        PROPOSAL,
+    );
     assert.deepEqual(normalizePlanModeData({ phase: "implementing", proposal: PROPOSAL }, ["read"]).proposal, PROPOSAL);
-    assert.equal(normalizePlanModeData({ phase: "implementing" }, ["read"]).phase, "planning");
+    assert.equal(normalizePlanModeData({ phase: "implementing" }, ["read"]).phase, "brainstorming");
+    assert.equal(normalizePlanModeData({ phase: "planning", proposal: PROPOSAL }, ["read"]).phase, "brainstorming");
 });

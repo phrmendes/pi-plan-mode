@@ -6,13 +6,11 @@ import { PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanProposal } from "./st
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
     title: "Improve flow",
-    summary: "Improve flow",
     problem: "The flow is hard to follow",
-    goals: ["Clarify orchestration"],
-    requirements: ["Use control tools"],
-    files: [{ path: "src/index.ts", reason: "Change orchestration" }],
-    steps: [{ title: "Refactor", description: "Use control tools" }],
-    successCriteria: ["Orchestration reads clearly"],
+    outcome: "The proposal flow is clear",
+    approach: "Use one proposal tool for submission and approval.",
+    changes: [{ path: "src/index.ts", change: "Simplify orchestration and remove duplicate actions" }],
+    acceptanceCriteria: ["One tool submits the proposal", "Transition tests pass"],
 };
 
 interface Entry {
@@ -180,13 +178,13 @@ test("phase prompt is turn-local system text", () => {
     const h = createHarness();
     h.start();
     const result = h.beforeAgentStart();
-    assert.match(result.systemPrompt, /^base\n\n# Brainstorming/);
+    assert.match(result.systemPrompt, /^base\n\n# Plan Mode/);
     assert.equal(result.message, undefined);
 });
 
-test("plan_submit uses the durable proposal schema", () => {
+test("plan_propose uses the durable proposal schema", () => {
     const h = createHarness();
-    assert.equal(h.toolDefinition("plan_submit").parameters, PLAN_PROPOSAL_SCHEMA);
+    assert.equal(h.toolDefinition("plan_propose").parameters, PLAN_PROPOSAL_SCHEMA);
 });
 
 test("implementation prompt renders the full PRD", () => {
@@ -197,84 +195,55 @@ test("implementation prompt renders the full PRD", () => {
     const result = h.beforeAgentStart();
     assert.match(result.systemPrompt, /# Improve flow/);
     assert.match(result.systemPrompt, /## Problem\nThe flow is hard to follow/);
-    assert.match(result.systemPrompt, /## Goals\n- Clarify orchestration/);
-    assert.match(result.systemPrompt, /Refactor — Use control tools/);
-    assert.match(result.systemPrompt, /Change orchestration/);
+    assert.doesNotMatch(result.systemPrompt, /## Goals/);
+    assert.match(result.systemPrompt, /Simplify orchestration/);
+    assert.match(result.systemPrompt, /Transition tests pass/);
 });
 
-test("plan_propose enters planning without a synthetic user message", async () => {
-    const h = createHarness();
+test("plan_propose shows one canonical proposal and enters implementation after approval", async () => {
+    const h = createHarness({ choices: ["Approve and implement"] });
     h.start();
-    await h.tool("plan_propose");
-    assert.equal(h.status, "plan: planning");
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_ask"]);
-    assert.deepEqual(h.sent, []);
-});
-
-test("plan_submit approval enters persistent implementation", async () => {
-    const h = createHarness({ choices: ["Implement now"] });
-    h.start();
-    await h.tool("plan_propose");
-    await h.tool("plan_submit", PROPOSAL);
+    await h.tool("plan_propose", PROPOSAL);
     assert.equal(h.status, "plan: implementing");
     assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
-});
-
-test("approving a proposal immediately nudges the agent to implement", async () => {
-    const h = createHarness({ choices: ["Implement now"] });
-    h.start();
-    await h.tool("plan_propose");
-    await h.tool("plan_submit", PROPOSAL);
+    assert.ok(h.notes.some((note) => note.includes("# Improve flow") && note.includes("Transition tests pass")));
     assert.deepEqual(h.sent, ["Begin implementation now."]);
 });
 
-test("plan_submit does not repeat the PRD in a notify toast", async () => {
-    const h = createHarness({ choices: ["Implement now"] });
-    h.start();
-    await h.tool("plan_propose");
-    await h.tool("plan_submit", PROPOSAL);
-    assert.ok(h.notes.every((note) => !note.includes("# Improve flow")));
-});
-
-test("plan_submit stores a proposal without UI approval", async () => {
+test("plan_propose stores and returns the formatted proposal without UI", async () => {
     const h = createHarness({ hasUI: false });
     h.start();
-    await h.tool("plan_propose");
-    await h.tool("plan_submit", PROPOSAL);
-    assert.equal(h.status, "plan: planning");
+    const result = await h.tool("plan_propose", PROPOSAL);
+    assert.equal(h.status, "plan: brainstorming");
     assert.equal(h.selectCalls, 0);
     assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
-    assert.deepEqual(h.activeTools, ["read", "bash", "plan_submit", "plan_ask", "plan_approve"]);
+    assert.match(result.content[0].text, /# Improve flow/);
 });
 
-test("plan_approve approves a stored proposal without resubmission", async () => {
-    const h = createHarness({
-        choices: ["Implement now"],
-        entries: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-    });
+test("plan_propose rejects placeholder content", async () => {
+    const h = createHarness();
     h.start();
-    await h.tool("plan_approve");
-    assert.equal(h.status, "plan: implementing");
+    await assert.rejects(h.tool("plan_propose", { ...PROPOSAL, approach: "TBD" }), /placeholder/i);
+    assert.equal(h.selectCalls, 0);
 });
 
-test("plan_approve shows the full PRD since there is no preceding chat message", async () => {
-    const h = createHarness({
-        choices: ["Implement now"],
-        entries: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-    });
+test("requesting revision clears the pending proposal", async () => {
+    const h = createHarness({ choices: ["Request revision"] });
     h.start();
-    await h.tool("plan_approve");
-    assert.ok(h.notes.some((note) => note.includes("# Improve flow") && note.includes("Refactor — Use control tools")));
-});
-
-test("rejected proposal reports the actual outcome", async () => {
-    const h = createHarness({ choices: ["Back to brainstorming"] });
-    h.start();
-    await h.tool("plan_propose");
-    const result = await h.tool("plan_submit", PROPOSAL);
-    assert.match(result.content[0].text, /rejected/i);
+    const result = await h.tool("plan_propose", PROPOSAL);
+    assert.match(result.content[0].text, /revision/i);
     assert.equal(h.appended.at(-1)?.proposal, undefined);
+    assert.equal(h.status, "plan: brainstorming");
+});
+
+test("deferring preserves the proposal for plan review", async () => {
+    const h = createHarness({ choices: ["Keep for later", "Approve and implement"] });
+    h.start();
+    await h.tool("plan_propose", PROPOSAL);
+    assert.deepEqual(h.appended.at(-1)?.proposal, PROPOSAL);
+    await h.command("review");
+    assert.equal(h.status, "plan: implementing");
 });
 
 test("plan_complete returns to brainstorming and clears the proposal", async () => {
@@ -322,9 +291,6 @@ test("bash gate is wired to read-only phases", async () => {
     const h = createHarness();
     h.start();
     assert.equal(h.toolCall("bash", "rm -rf /")?.block, true);
-    await h.tool("plan_propose");
-    assert.equal(h.toolCall("bash", "rm -rf /")?.block, true);
-
     const implementation = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
     });
@@ -337,28 +303,14 @@ test("command completions follow the current phase", async () => {
     h.start();
     assert.deepEqual(h.completions(), []);
     await h.command();
-    assert.deepEqual(h.completions(), ["create", "disable"]);
-    await h.command("create");
-    assert.deepEqual(h.completions(), ["bstorm", "disable"]);
-    await h.command("bstorm");
-    assert.deepEqual(h.completions(), ["create", "disable"]);
+    assert.deepEqual(h.completions(), ["review", "disable"]);
 });
 
-test("create and bstorm commands enforce phase guards", async () => {
+test("review reports when no proposal is stored", async () => {
     const h = createHarness();
     h.start();
-    await h.command("bstorm");
-    assert.match(h.notes.at(-1) ?? "", /only in planning/i);
-    await h.command("create");
-    await h.command("create");
-    assert.match(h.notes.at(-1) ?? "", /only in brainstorming/i);
-});
-
-test("create remains a synthetic-message fallback", async () => {
-    const h = createHarness();
-    h.start();
-    await h.command("create");
-    assert.deepEqual(h.sent, ["Draft and submit the formal proposal."]);
+    await h.command("review");
+    assert.match(h.notes.at(-1) ?? "", /no stored proposal/i);
 });
 
 test("disable is available only while plan mode is enabled", async () => {
@@ -374,10 +326,10 @@ test("disable is available only while plan mode is enabled", async () => {
 test("restores state from the active branch", () => {
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-        branch: [entry({ phase: "planning", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+        branch: [entry({ phase: "brainstorming", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
     });
     h.start();
-    assert.equal(h.status, "plan: planning");
+    assert.equal(h.status, "plan: brainstorming");
 });
 
 test("invalid control tool transition throws", async () => {
@@ -386,11 +338,9 @@ test("invalid control tool transition throws", async () => {
     await assert.rejects(h.tool("plan_complete"), /implementing/i);
 });
 
-test("plan_ask is available in brainstorming and planning but not implementing", async () => {
+test("plan_ask is available in brainstorming but not implementing", async () => {
     const h = createHarness();
     h.start();
-    assert.ok(h.activeTools.includes("plan_ask"));
-    await h.tool("plan_propose");
     assert.ok(h.activeTools.includes("plan_ask"));
 
     const implementation = createHarness({
@@ -400,7 +350,7 @@ test("plan_ask is available in brainstorming and planning but not implementing",
     assert.ok(!implementation.activeTools.includes("plan_ask"));
     await assert.rejects(
         implementation.tool("plan_ask", { questions: [{ question: "q", options: ["a"] }] }),
-        /brainstorming or planning/i,
+        /brainstorming/i,
     );
 });
 

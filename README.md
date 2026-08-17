@@ -1,60 +1,68 @@
 # pi-plan-mode
 
-Agent-driven plan mode for the [pi coding agent](https://github.com/earendil-works/pi), with read-only discovery, structured approval, and durable implementation sessions.
+Agent-driven plan mode for the [pi coding agent](https://github.com/earendil-works/pi), with restricted discovery, structured proposal review, and durable implementation sessions.
 
 ## Flow
 
 ```mermaid
 stateDiagram-v2
     [*] --> brainstorming : fresh session or /plan
-    brainstorming --> planning : plan_propose or /plan create
-    planning --> brainstorming : /plan bstorm
-    planning --> implementing : approved plan_submit
+    brainstorming --> brainstorming : revise or defer proposal
+    brainstorming --> implementing : approve plan_propose
     implementing --> brainstorming : plan_complete
 ```
 
-The agent normally advances the workflow through typed control tools:
+The agent uses three control tools:
 
-- `plan_propose` enters planning after the user requests a proposal.
-- `plan_ask` asks the user one or more multiple-choice clarifying questions, with a free-text "Other" fallback, in brainstorming and planning.
-- `plan_submit` sends a full PRD (problem, goals, requirements, files, steps, success criteria) for approval.
-- `plan_approve` reopens approval for a stored proposal without resubmission.
-- `plan_complete` ends implementation after all work is verified.
+- `plan_ask` asks one or more multiple-choice clarification questions, with a free-text fallback.
+- `plan_propose` submits one complete engineering proposal for review and approval.
+- `plan_complete` ends implementation after all work and verification finish.
 
-Choosing "Implement now" transitions to implementing and immediately queues a follow-up turn, so the agent starts work without waiting for another user message.
+The agent submits structured proposal data once. The extension stores it, formats it as Markdown, shows the complete proposal, and asks the user to approve, revise, or keep it for later. Approval immediately queues implementation without another user message.
 
-Implementation remains active across retries and user turns. Approval applies to the accepted proposal, not only one agent run. `plan_complete` must run separately after all implementation and verification tools finish.
+A brief PRD covers the problem, outcome, approach, concrete file or area changes, and acceptance criteria.
 
-## Manual fallbacks
+## Manual controls
 
-The `/plan` command is always registered. Its argument suggestions depend on the current phase.
+| State         | Command         | Result                            |
+| ------------- | --------------- | --------------------------------- |
+| Off           | `/plan`         | Enter restricted brainstorming    |
+| Brainstorming | `/plan review`  | Reopen a stored deferred proposal |
+| Enabled       | `/plan disable` | Exit plan mode and restore tools  |
 
-| Phase         | Available input                 |
-| ------------- | ------------------------------- |
-| Off           | `/plan`                         |
-| Brainstorming | `/plan create`, `/plan disable` |
-| Planning      | `/plan bstorm`, `/plan disable` |
-| Implementing  | `/plan disable`                 |
+Invalid transitions are rejected. `/plan review` reports when no proposal is stored.
 
-Invalid phase transitions are rejected.
+## Proposal review
+
+The extension renders proposals in a stable Markdown order:
+
+1. Problem
+2. Outcome
+3. Approach
+4. Changes
+5. Acceptance criteria
+
+In a UI session, the review choices are:
+
+- **Approve and implement** — enable saved tools and start implementation.
+- **Request revision** — clear the proposal and continue brainstorming.
+- **Keep for later** — preserve the proposal for `/plan review`.
+
+Without a UI, the tool returns the formatted proposal and stores it for later review.
 
 ## Permissions
 
-Brainstorming and planning expose only `read`, gated `bash`, and the control tool for the current phase. Bash commands must match a conservative inspection allowlist.
+Brainstorming exposes only `read`, gated `bash`, `plan_ask`, and `plan_propose`. Bash commands must match a conservative inspection allowlist.
 
-Implementation restores the tools captured when plan mode started and adds `plan_complete`. Disabling plan mode restores the captured tools. Before reload, new, resume, or fork, the old runtime also restores the captured tools. Restoring an already disabled session does not change current tools.
+Implementation restores the tools captured when plan mode started and adds `plan_complete`. Disabling plan mode restores the captured tools. Before reload, new, resume, or fork, the old runtime also restores them.
 
-The bash gate reduces accidental writes. It is not a security sandbox. Commands still run with the user's permissions, so install only extensions that you trust.
+The Bash gate reduces accidental writes. It is not a security sandbox. Package-manager verification scripts can execute arbitrary project-defined commands. Install only extensions and inspect only projects that you trust.
 
-The allowlist is a fixed list of command and subcommand names, not a general script runner. Package-manager scripts are blocked by default; `pnpm`/`npm` allow only `test`, `run typecheck`, `run format:check`, and `run lint`. Other scripts, including `pnpm format` and `pnpm install`, stay blocked in brainstorming and planning.
+## State and migration
 
-## State and prompts
+The current phase, pending or approved proposal, and original tool snapshot persist on the active session branch. Legacy planning sessions restore as brainstorming. Valid legacy proposals are converted to the current engineering proposal format.
 
-The current phase, PRD proposal, and original tool snapshot persist on the active session branch. Invalid persisted data is normalized during startup.
-
-Phase instructions are compact, turn-local system-prompt additions. They are not stored as conversation messages or discoverable pi skills.
-
-A proposal submitted without a UI remains in planning. In a UI-capable session, `plan_approve` can approve it without submitting the proposal again.
+Phase instructions are compact, turn-local system-prompt additions. They are not stored as conversation messages or exposed as pi skills.
 
 ## Install
 
@@ -70,23 +78,10 @@ pnpm install
 pnpm test
 pnpm run typecheck
 pnpm run format:check
-```
-
-## Runtime checks
-
-Before a release, verify these flows in the real pi TUI:
-
-- Enter and disable plan mode.
-- Reload while brainstorming.
-- Start a new session while planning.
-- Resume and approve a stored proposal with `plan_approve`.
-- Confirm that `plan_complete` is rejected while another tool runs.
-
-Verify package contents with:
-
-```bash
 pnpm run pack:check
 ```
+
+Before release, verify approval, revision, deferral, `/plan review`, reload, resume, non-UI submission, and completion in a real pi session.
 
 ## License
 

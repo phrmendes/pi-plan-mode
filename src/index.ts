@@ -10,7 +10,7 @@ import {
     type PlanState,
 } from "./state.ts";
 
-const CONTROL_TOOLS = new Set(["plan_propose", "plan_submit", "plan_approve", "plan_complete", "plan_ask"]);
+const CONTROL_TOOLS = new Set(["plan_propose", "plan_complete", "plan_ask"]);
 const READ_ONLY_TOOLS = new Set(["read", "bash"]);
 const ASK_OTHER_OPTION = "Other (type your own)";
 const PLAN_ASK_SCHEMA = Type.Object({
@@ -31,15 +31,7 @@ const PHASES: Record<
         readOnly: true,
         controls: ["plan_propose", "plan_ask"],
         commands: [
-            { value: "create", label: "create — enter planning" },
-            { value: "disable", label: "disable — exit plan mode" },
-        ],
-    },
-    planning: {
-        readOnly: true,
-        controls: ["plan_submit", "plan_ask"],
-        commands: [
-            { value: "bstorm", label: "bstorm — return to brainstorming" },
+            { value: "review", label: "review — review the stored proposal" },
             { value: "disable", label: "disable — exit plan mode" },
         ],
     },
@@ -51,7 +43,6 @@ const PHASES: Record<
 };
 const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
     brainstorming: "plan: brainstorming — read-only, exploring",
-    planning: "plan: planning — read-only, drafting proposal",
     implementing: "plan: implementing — approved tools enabled",
 };
 export interface PlanModeOptions {
@@ -80,9 +71,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     function toolsFor(phase: Exclude<PlanState, "off">): string[] {
         const config = PHASES[phase];
         const tools = config.readOnly ? data.savedTools.filter((tool) => READ_ONLY_TOOLS.has(tool)) : data.savedTools;
-        const controls = [...config.controls];
-        if (phase === "planning" && data.proposal) controls.push("plan_approve");
-        return [...new Set([...tools, ...controls])];
+        return [...new Set([...tools, ...config.controls])];
     }
 
     /** Enters a phase and applies its tool permissions. */
@@ -104,12 +93,6 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     /** Throws when a control tool is called outside its allowed phase. */
     function requirePhase(expected: PlanState): void {
         if (data.phase !== expected) throw new Error(`This action is available only in ${expected} mode.`);
-    }
-
-    /** Throws when a control tool is called outside one of its allowed phases. */
-    function requireAnyPhase(expected: PlanState[]): void {
-        if (!expected.includes(data.phase))
-            throw new Error(`This action is available only in ${expected.join(" or ")} mode.`);
     }
 
     /** Asks one clarifying question, falling back to free text for a custom answer. */
@@ -148,38 +131,46 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         return `\n\n## ${heading}\n${items.map((item) => `- ${item}`).join("\n")}`;
     }
 
-    /** Formats a proposal as a Markdown PRD for approval recaps and the implementation contract. */
+    /** Rejects placeholder text that cannot support an informed approval. */
+    function requireCompleteProposal(proposal: PlanProposal): void {
+        const content = JSON.stringify(proposal);
+        if (/\b(?:tbd|todo|etc\.?|as needed|unknown)\b/i.test(content)) {
+            throw new Error("The proposal contains placeholder content. Resolve it before proposing.");
+        }
+    }
+
+    /** Formats the canonical engineering proposal for review and implementation. */
     function formatProposal(proposal: PlanProposal): string {
-        const files = proposal.files.map((file) => `- ${file.path} — ${file.reason}`).join("\n");
-        const steps = proposal.steps
-            .map((step, index) => `${index + 1}. ${step.title} — ${step.description}`)
-            .join("\n");
+        const changes = proposal.changes.map((item) => `- \`${item.path}\` — ${item.change}`).join("\n");
         return (
-            `# ${proposal.title}\n\n${proposal.summary}` +
+            `# ${proposal.title}` +
             `\n\n## Problem\n${proposal.problem}` +
-            bulletSection("Goals", proposal.goals) +
-            bulletSection("Non-Goals", proposal.nonGoals) +
-            bulletSection("Requirements", proposal.requirements) +
-            (files ? `\n\n## Files\n${files}` : "") +
-            `\n\n## Implementation Steps\n${steps}` +
-            bulletSection("Risks", proposal.risks) +
-            bulletSection("Success Criteria", proposal.successCriteria)
+            `\n\n## Outcome\n${proposal.outcome}` +
+            `\n\n## Approach\n${proposal.approach}` +
+            `\n\n## Changes\n${changes}` +
+            bulletSection("Acceptance Criteria", proposal.acceptanceCriteria)
         );
     }
 
-    /** Requests approval for the currently stored proposal. */
-    async function approveProposal(ctx: ExtensionContext, showRecap: boolean) {
+    /** Shows the stored proposal and requests a user decision. */
+    async function reviewProposal(ctx: ExtensionContext) {
         if (!data.proposal) throw new Error("No stored proposal is available.");
+        const markdown = formatProposal(data.proposal);
         if (!ctx.hasUI) {
             return {
-                content: [{ type: "text" as const, text: "Proposal stored. Approval requires a UI session." }],
+                content: [
+                    { type: "text" as const, text: `Proposal stored. Approval requires a UI session.\n\n${markdown}` },
+                ],
                 details: {},
             };
         }
-        const prompt = showRecap ? "Plan proposed — accept?" : "Plan proposed above — accept?";
-        if (showRecap) ctx.ui.notify(formatProposal(data.proposal));
-        const choice = await ctx.ui.select(prompt, ["Implement now", "Back to brainstorming"]);
-        if (choice === "Implement now") {
+        ctx.ui.notify(markdown);
+        const choice = await ctx.ui.select("Review the proposal above", [
+            "Approve and implement",
+            "Request revision",
+            "Keep for later",
+        ]);
+        if (choice === "Approve and implement") {
             transition(ctx, "implementing");
             pi.sendUserMessage("Begin implementation now.", { deliverAs: "followUp" });
             return {
@@ -187,57 +178,28 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 details: {},
             };
         }
-        if (choice === "Back to brainstorming") {
+        if (choice === "Request revision") {
             data.proposal = undefined;
-            transition(ctx, "brainstorming");
+            persistState();
             return {
-                content: [{ type: "text" as const, text: "Proposal rejected. Brainstorming restored." }],
+                content: [{ type: "text" as const, text: "Proposal needs revision. Brainstorming continues." }],
                 details: {},
             };
         }
-        return {
-            content: [{ type: "text" as const, text: "Proposal stored in planning without approval." }],
-            details: {},
-        };
+        return { content: [{ type: "text" as const, text: "Proposal stored for later review." }], details: {} };
     }
 
     pi.registerTool({
         name: "plan_propose",
-        label: "Enter Planning",
-        description: "Enter planning after the user requests a formal proposal",
-        parameters: Type.Object({}),
-        async execute(_id, _params, _signal, _update, ctx) {
-            requirePhase("brainstorming");
-            transition(ctx, "planning");
-            return {
-                content: [{ type: "text" as const, text: "Planning mode active. Submit with plan_submit." }],
-                details: {},
-            };
-        },
-    });
-
-    pi.registerTool({
-        name: "plan_submit",
-        label: "Submit Plan",
-        description: "Submit a structured proposal for user approval",
+        label: "Propose Plan",
+        description: "Submit one complete engineering proposal for user review and approval",
         parameters: PLAN_PROPOSAL_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
-            requirePhase("planning");
+            requirePhase("brainstorming");
+            requireCompleteProposal(params);
             data.proposal = params;
             persistState();
-            pi.setActiveTools(toolsFor("planning"));
-            return approveProposal(ctx, false);
-        },
-    });
-
-    pi.registerTool({
-        name: "plan_approve",
-        label: "Approve Stored Plan",
-        description: "Approve a proposal already stored in planning",
-        parameters: Type.Object({}),
-        async execute(_id, _params, _signal, _update, ctx) {
-            requirePhase("planning");
-            return approveProposal(ctx, true);
+            return reviewProposal(ctx);
         },
     });
 
@@ -267,7 +229,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
             "Ask the user one or more multiple-choice clarifying questions before proposing or submitting work",
         parameters: PLAN_ASK_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
-            requireAnyPhase(["brainstorming", "planning"]);
+            requirePhase("brainstorming");
             if (!ctx.hasUI) {
                 return {
                     content: [
@@ -286,22 +248,13 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         },
     });
 
-    const subcommands: Record<string, (ctx: ExtensionContext) => void> = {
-        create(ctx) {
-            if (data.phase !== "brainstorming") {
-                ctx.ui.notify("/plan create is available only in brainstorming.", "warning");
+    const subcommands: Record<string, (ctx: ExtensionContext) => void | Promise<void>> = {
+        async review(ctx) {
+            if (data.phase !== "brainstorming" || !data.proposal) {
+                ctx.ui.notify("No stored proposal is available for review.", "warning");
                 return;
             }
-            transition(ctx, "planning");
-            pi.sendUserMessage("Draft and submit the formal proposal.", { deliverAs: "followUp" });
-        },
-        bstorm(ctx) {
-            if (data.phase !== "planning") {
-                ctx.ui.notify("/plan bstorm is available only in planning.", "warning");
-                return;
-            }
-            data.proposal = undefined;
-            transition(ctx, "brainstorming");
+            await reviewProposal(ctx);
         },
         disable(ctx) {
             if (data.phase === "off") {
@@ -330,12 +283,12 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
                 ctx.ui.notify(`Unknown subcommand: ${args}`, "warning");
                 return;
             }
-            handler(ctx);
+            await handler(ctx);
         },
     });
 
     pi.on("tool_call", (event) => {
-        if ((data.phase !== "brainstorming" && data.phase !== "planning") || event.toolName !== "bash") return;
+        if (data.phase !== "brainstorming" || event.toolName !== "bash") return;
         const command = event.input.command;
         if (typeof command !== "string" || !isAllowedInspectionCommand(command)) {
             return { block: true, reason: `Plan mode: blocked — not a read-only command.\n${command}` };
