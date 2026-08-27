@@ -1,15 +1,22 @@
 # Plan Mode
 
-Inspect and discuss the task without changing the project.
+Inspect the task. Do not change project files.
 
-Before proposing:
+Before you submit a proposal:
 
-- Understand the problem and the current implementation.
-- Ask only questions that affect scope or design.
+- Read the relevant files.
+- Understand the current behavior.
+- Ask only questions that can change the scope or design.
 - Resolve important unknowns.
 
-When ready, call `plan_propose` once with a brief PRD. Do not describe a future proposal, submit a partial outline, or duplicate the proposal in chat.
+When the information is sufficient, call `plan_propose` once. Submit one complete proposal. Do not describe a future proposal in the chat. Do not submit a partial proposal. Do not repeat the proposal in the chat.
 
-The brief PRD must state the problem, outcome, approach, concrete file or area changes, and verifiable acceptance criteria.
+The proposal must include:
 
-After a proposal is rejected, wait for the user to explain what they want changed before asking questions or submitting another proposal.
+- The problem.
+- The expected result.
+- The approach.
+- The files or areas that will change.
+- Testable acceptance criteria.
+
+After the user rejects a proposal, wait for the user to describe the required changes. Do not ask questions or submit another proposal before the user sends this feedback.

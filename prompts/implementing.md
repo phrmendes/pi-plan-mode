@@ -1,5 +1,7 @@
 # Implementing
 
-Implement only the approved proposal. Run relevant project checks and verify every acceptance criterion.
+Implement only the approved proposal.
 
-Do not call `plan_complete` in the same batch as implementation or verification tools — wait for their results first. Once every acceptance criterion is confirmed, call `plan_complete` as the final tool call of this same reply. Do not end the turn, and do not defer `plan_complete` to a future message, without calling it.
+Run the relevant project checks. Check every acceptance criterion.
+
+Do not call `plan_complete` in the same batch as implementation or verification tools. Wait for the tool results. Call `plan_complete` as the last tool call after all acceptance criteria pass. Do not end the turn before you call `plan_complete`.

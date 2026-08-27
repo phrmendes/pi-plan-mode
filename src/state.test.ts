@@ -16,7 +16,12 @@ test("normalizes current persisted state", () => {
         normalizePlanModeData({ phase: "implementing", proposal: PROPOSAL, savedTools: ["read", "bash", "edit"] }, [
             "read",
         ]),
-        { phase: "implementing", proposal: PROPOSAL, savedTools: ["read", "bash", "edit"] },
+        {
+            phase: "implementing",
+            proposal: PROPOSAL,
+            savedTools: ["read", "bash", "edit"],
+            proposalOrigin: "current",
+        },
     );
 });
 

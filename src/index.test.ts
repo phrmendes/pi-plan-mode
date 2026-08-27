@@ -138,6 +138,7 @@ function createHarness(options: HarnessOptions = {}) {
         emit: (name: string, event: unknown = {}) => events.get(name)?.(event, ctx),
         toolCall: (toolName: string, command: string) =>
             events.get("tool_call")?.({ toolName, input: { command } }, ctx) as { block?: boolean } | undefined,
+        input: (text: string, source = "interactive") => events.get("input")?.({ text, source }, ctx),
         beforeAgentStart: (systemPrompt = "base") =>
             events.get("before_agent_start")!({ systemPrompt }, ctx) as {
                 systemPrompt: string;
@@ -259,10 +260,21 @@ test("requesting revision clears the pending proposal", async () => {
     const h = createHarness({ choices: ["Request revision"] });
     h.start();
     const result = await h.tool("plan_propose", PROPOSAL);
-    assert.match(result.content[0].text, /revision/i);
-    assert.match(result.content[0].text, /wait for the user/i);
+    assert.match(result.content[0].text, /rejected/i);
+    assert.match(result.content[0].text, /your feedback/i);
     assert.equal(h.appended.at(-1)?.proposal, undefined);
+    assert.equal(h.status, "plan: waiting for feedback");
+});
+
+test("revision blocks new proposals and questions until user feedback", async () => {
+    const h = createHarness({ choices: ["Request revision"] });
+    h.start();
+    await h.tool("plan_propose", PROPOSAL);
+    await assert.rejects(h.tool("plan_propose", PROPOSAL), /feedback/i);
+    await assert.rejects(h.tool("plan_ask", { questions: [{ question: "q", options: ["a"] }] }), /feedback/i);
+    h.input("Change the approach");
     assert.equal(h.status, "plan: brainstorming");
+    await h.tool("plan_ask", { questions: [{ question: "q", options: ["a"] }] });
 });
 
 test("deferring preserves the proposal for plan review", async () => {

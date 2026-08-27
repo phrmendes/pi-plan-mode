@@ -107,7 +107,8 @@ function isAllowedSegment(words: string[]): boolean {
 
 /** Returns whether all shell segments match the fail-closed inspection allowlist. */
 export function isAllowedInspectionCommand(command: string): boolean {
-    if (command.includes("`") || command.includes("$(")) return false;
+    if (command.includes("\n") || command.includes("\r") || command.includes("`") || command.includes("$("))
+        return false;
     try {
         const segments: string[][] = [[]];
         for (const token of parseShell(command)) {

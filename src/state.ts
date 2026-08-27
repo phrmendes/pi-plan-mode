@@ -27,6 +27,8 @@ export interface PlanModeData {
     phase: PlanState;
     proposal?: PlanProposal;
     savedTools: string[];
+    waitingForUserFeedback?: boolean;
+    proposalOrigin?: "current" | "legacy";
 }
 
 const PLAN_STATE_SET = new Set<string>(PLAN_STATES);
@@ -125,9 +127,24 @@ export function normalizePlanModeData(value: unknown, activeTools: string[]): Pl
               : raw.enabled
                 ? "brainstorming"
                 : "off";
-    let proposal =
-        normalizeProposal(raw.proposal) ?? normalizeDetailedProposal(raw.proposal) ?? normalizeLegacySteps(raw.steps);
-    if (phase === "off") proposal = undefined;
-    if (phase === "implementing" && !proposal) phase = "brainstorming";
-    return { phase, proposal, savedTools: normalizeTools(raw.savedTools, activeTools) };
+    const currentProposal = normalizeProposal(raw.proposal);
+    const migratedProposal = normalizeDetailedProposal(raw.proposal) ?? normalizeLegacySteps(raw.steps);
+    let proposal = currentProposal ?? migratedProposal;
+    let proposalOrigin: PlanModeData["proposalOrigin"] = currentProposal
+        ? "current"
+        : migratedProposal
+          ? "legacy"
+          : undefined;
+    if (phase === "off") {
+        proposal = undefined;
+        proposalOrigin = undefined;
+    }
+    if (phase === "implementing" && (!proposal || proposalOrigin === "legacy")) phase = "brainstorming";
+    return {
+        phase,
+        ...(proposal ? { proposal } : {}),
+        savedTools: normalizeTools(raw.savedTools, activeTools),
+        ...(raw.waitingForUserFeedback === true ? { waitingForUserFeedback: true } : {}),
+        ...(proposalOrigin ? { proposalOrigin } : {}),
+    };
 }

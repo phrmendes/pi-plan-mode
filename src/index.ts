@@ -66,7 +66,12 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
 
     /** Updates the plan status indicator. */
     function setPlanStatus(ctx: ExtensionContext): void {
-        ctx.ui.setStatus("plan", data.phase === "off" ? undefined : `plan: ${data.phase}`);
+        if (data.phase === "off") {
+            ctx.ui.setStatus("plan", undefined);
+            return;
+        }
+        const state = data.waitingForUserFeedback ? "waiting for feedback" : data.phase;
+        ctx.ui.setStatus("plan", `plan: ${state}`);
     }
 
     /** Returns the tool set for an enabled phase. */
@@ -82,6 +87,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         if (data.phase === "off" && next !== "off") data.savedTools = baseTools();
         if (next === "implementing") hasNudgedForProposal = false;
         data.phase = next;
+        if (next !== "brainstorming") data.waitingForUserFeedback = undefined;
         if (next === "off") {
             data.proposal = undefined;
             pi.setActiveTools(data.savedTools);
@@ -160,12 +166,14 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         }
         if (choice === "Request revision") {
             data.proposal = undefined;
+            data.waitingForUserFeedback = true;
+            setPlanStatus(ctx);
             persistState();
             return {
                 content: [
                     {
                         type: "text" as const,
-                        text: "Proposal rejected and needs revision. Brainstorming continues. Wait for the user to explain what they want changed; do not ask questions or submit another proposal yet.",
+                        text: "Proposal rejected. Plan mode is waiting for your feedback. Describe the required changes before the agent asks questions or submits another proposal.",
                     },
                 ],
                 details: {},
@@ -177,10 +185,11 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     pi.registerTool({
         name: "plan_propose",
         label: "Propose Plan",
-        description: "Submit one complete engineering proposal for user review and approval",
+        description: "Submit one complete proposal for user review and approval",
         parameters: PLAN_PROPOSAL_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
             requirePhase("brainstorming");
+            if (data.waitingForUserFeedback) throw new Error("Wait for the user to provide revision feedback first.");
             requireCompleteProposal(params);
             data.proposal = params;
             persistState();
@@ -191,7 +200,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     pi.registerTool({
         name: "plan_complete",
         label: "Complete Plan",
-        description: "Complete the approved proposal after implementation and verification",
+        description: "Complete the approved proposal after implementation and checks",
         parameters: Type.Object({}),
         async execute(_id, _params, _signal, _update, ctx) {
             requirePhase("implementing");
@@ -210,11 +219,11 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     pi.registerTool({
         name: "plan_ask",
         label: "Ask Clarifying Questions",
-        description:
-            "Ask the user one or more multiple-choice clarifying questions before proposing or submitting work",
+        description: "Ask the user one or more choice questions before you submit a proposal",
         parameters: PLAN_ASK_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
             requirePhase("brainstorming");
+            if (data.waitingForUserFeedback) throw new Error("Wait for the user to provide revision feedback first.");
             if (!ctx.hasUI) {
                 return {
                     content: [
@@ -255,7 +264,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     };
 
     pi.registerCommand("plan", {
-        description: "Enter plan mode or use a phase-specific fallback",
+        description: "Enter plan mode or run a phase command",
         getArgumentCompletions: (prefix: string) => {
             const matches = PHASES[data.phase].commands.filter((item) => item.value.startsWith(prefix));
             return matches.length > 0 ? matches : null;
@@ -274,6 +283,16 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
             }
             await handler(ctx);
         },
+    });
+
+    pi.on("input", (event, ctx) => {
+        const source = (event as { source?: string }).source;
+        if (data.waitingForUserFeedback && source !== "extension") {
+            data.waitingForUserFeedback = undefined;
+            setPlanStatus(ctx as ExtensionContext);
+            persistState();
+        }
+        return { action: "continue" as const };
     });
 
     pi.on("tool_call", (event) => {

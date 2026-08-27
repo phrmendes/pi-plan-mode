@@ -32,6 +32,11 @@ const blocked = [
     "curl -X POST https://example.com",
     "echo $(whoami)",
     "cat file > copy",
+    "pwd\nrm -rf /",
+    "cat < secret",
+    "FOO=bar pwd",
+    "cat <(ls)",
+    "git --exec-path status",
 ];
 
 test("allows configured inspection commands", () => {
