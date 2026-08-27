@@ -260,6 +260,7 @@ test("requesting revision clears the pending proposal", async () => {
     h.start();
     const result = await h.tool("plan_propose", PROPOSAL);
     assert.match(result.content[0].text, /revision/i);
+    assert.match(result.content[0].text, /wait for the user/i);
     assert.equal(h.appended.at(-1)?.proposal, undefined);
     assert.equal(h.status, "plan: brainstorming");
 });

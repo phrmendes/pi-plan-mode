@@ -11,3 +11,5 @@ Before proposing:
 When ready, call `plan_propose` once with a brief PRD. Do not describe a future proposal, submit a partial outline, or duplicate the proposal in chat.
 
 The brief PRD must state the problem, outcome, approach, concrete file or area changes, and verifiable acceptance criteria.
+
+After a proposal is rejected, wait for the user to explain what they want changed before asking questions or submitting another proposal.

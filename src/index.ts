@@ -162,7 +162,12 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
             data.proposal = undefined;
             persistState();
             return {
-                content: [{ type: "text" as const, text: "Proposal needs revision. Brainstorming continues." }],
+                content: [
+                    {
+                        type: "text" as const,
+                        text: "Proposal rejected and needs revision. Brainstorming continues. Wait for the user to explain what they want changed; do not ask questions or submit another proposal yet.",
+                    },
+                ],
                 details: {},
             };
         }
