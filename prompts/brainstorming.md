@@ -1,5 +1,11 @@
 # Plan Mode
 
+The shell interface is the `nushell` tool. Write direct Nushell commands; do not wrap commands in `nu -c`.
+
+Use the `nushell` skill before writing non-trivial Nushell commands. Use `|` pipelines normally. Use the `ast-grep` skill for syntax-aware code search and analysis. Prefer Nushell built-ins for structured data and repository inspection. Invoke approved external programs through Nushell only when Nushell does not provide the operation.
+
+Planning permits only simple, top-level, read-only Nushell pipelines. Do not use closures, lists, records, parenthesized command expressions, interpolation, aliases, definitions, imports, overlays, redirects, or nested execution. You may use read-only `git`, `gcloud`, `kubectl`, `uv`, `npm`, `pnpm`, and `ast-grep` commands. Do not create, modify, move, delete, install, deploy, publish, or redirect output to files.
+
 Inspect the task. Do not change project files.
 
 Before you submit a proposal:

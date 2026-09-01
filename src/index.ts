@@ -2,126 +2,26 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@ear
 import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
-import { isAllowedInspectionCommand } from "./policy.ts";
-import { formatProposal, requireCompleteProposal } from "./proposal.ts";
-import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanState } from "./state.ts";
+import { createNushellExecutor, NUSHELL_SCHEMA, type NushellRunner } from "./nushell.ts";
+import { createPlanController, PLAN_ASK_SCHEMA } from "./plan.ts";
+import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanState } from "./state.ts";
 
-const CONTROL_TOOLS = new Set(["plan_propose", "plan_complete", "plan_ask"]);
-const READ_ONLY_TOOLS = new Set(["read", "bash"]);
-const ASK_OTHER_OPTION = "Other (type your own)";
-const PLAN_ASK_SCHEMA = Type.Object({
-    questions: Type.Array(
-        Type.Object({
-            question: Type.String({ minLength: 1 }),
-            options: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-        }),
-        { minItems: 1 },
-    ),
-});
-const PHASES: Record<
-    PlanState,
-    { readOnly: boolean; controls: string[]; commands: Array<{ value: string; label: string }> }
-> = {
-    off: { readOnly: false, controls: [], commands: [] },
-    brainstorming: {
-        readOnly: true,
-        controls: ["plan_propose", "plan_ask"],
-        commands: [
-            { value: "review", label: "review — review the stored proposal" },
-            { value: "disable", label: "disable — exit plan mode" },
-        ],
-    },
-    implementing: {
-        readOnly: false,
-        controls: ["plan_complete"],
-        commands: [{ value: "disable", label: "disable — exit plan mode" }],
-    },
-};
-const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
-    brainstorming: "plan: brainstorming — read-only, exploring",
-    implementing: "plan: implementing — approved tools enabled",
-};
 export interface PlanModeOptions {
     loadPrompt?: (phase: PlanState) => string | null;
+    nushellRunner?: NushellRunner;
 }
 
 /** Registers the agent-driven plan workflow. */
 export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
-    const baseTools = (): string[] => pi.getActiveTools().filter((tool) => !CONTROL_TOOLS.has(tool));
-    let data: PlanModeData = normalizePlanModeData(undefined, []);
     const promptCache = new Map<PlanState, string>();
-    const promptFailures = new Set<PlanState>();
-    const activeImplementationTools = new Set<string>();
-    let hasNudgedForProposal = false;
+    const nushell = createNushellExecutor(options.nushellRunner);
 
     pi.registerEntryRenderer("plan-proposal", (entry) => {
         const proposal = entry.data as { markdown: string };
         return new Markdown(proposal.markdown, 0, 0, getMarkdownTheme());
     });
 
-    /** Persists the durable workflow state. */
-    function persistState(): void {
-        pi.appendEntry("plan-mode", data);
-    }
-
-    /** Updates the plan status indicator. */
-    function setPlanStatus(ctx: ExtensionContext): void {
-        if (data.phase === "off") {
-            ctx.ui.setStatus("plan", undefined);
-            return;
-        }
-        const state = data.waitingForUserFeedback ? "waiting for feedback" : data.phase;
-        ctx.ui.setStatus("plan", `plan: ${state}`);
-    }
-
-    /** Returns the tool set for an enabled phase. */
-    function toolsFor(phase: Exclude<PlanState, "off">): string[] {
-        const config = PHASES[phase];
-        const tools = config.readOnly ? data.savedTools.filter((tool) => READ_ONLY_TOOLS.has(tool)) : data.savedTools;
-        return [...new Set([...tools, ...config.controls])];
-    }
-
-    /** Enters a phase and applies its tool permissions. */
-    function transition(ctx: ExtensionContext, next: PlanState): void {
-        if (data.phase === next) return;
-        if (data.phase === "off" && next !== "off") data.savedTools = baseTools();
-        if (next === "implementing") hasNudgedForProposal = false;
-        data.phase = next;
-        if (next !== "brainstorming") data.waitingForUserFeedback = undefined;
-        if (next === "off") {
-            data.proposal = undefined;
-            pi.setActiveTools(data.savedTools);
-        } else {
-            pi.setActiveTools(toolsFor(next));
-        }
-        setPlanStatus(ctx);
-        ctx.ui.notify(next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]);
-        persistState();
-    }
-
-    /** Throws when a control tool is called outside its allowed phase. */
-    function requirePhase(expected: PlanState): void {
-        if (data.phase !== expected) throw new Error(`This action is available only in ${expected} mode.`);
-    }
-
-    /** Returns whether an implementation tool call is still executing. */
-    function hasToolsInFlight(): boolean {
-        return activeImplementationTools.size > 0;
-    }
-
-    /** Asks one clarifying question, falling back to free text for a custom answer. */
-    async function askQuestion(
-        ctx: ExtensionContext,
-        question: string,
-        options: string[],
-    ): Promise<{ question: string; answer: string }> {
-        const choice = await ctx.ui.select(question, [...options, ASK_OTHER_OPTION]);
-        if (choice !== undefined && choice !== ASK_OTHER_OPTION) return { question, answer: choice };
-        const custom = await ctx.ui.input("Your answer:");
-        return { question, answer: custom && custom.trim().length > 0 ? custom.trim() : "No answer provided" };
-    }
-
-    /** Reads one bundled phase prompt. */
+    /** Reads one bundled phase prompt from disk. */
     function readBundledPrompt(phase: PlanState): string | null {
         try {
             return readFileSync(new URL(`../prompts/${phase}.md`, import.meta.url), "utf8");
@@ -130,7 +30,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         }
     }
 
-    /** Loads the compact prompt contract for a phase. */
+    /** Loads and caches the prompt contract for a phase. */
     function loadPhasePrompt(phase: PlanState): string | null {
         const cached = promptCache.get(phase);
         if (cached) return cached;
@@ -139,48 +39,25 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         return content;
     }
 
-    /** Shows the stored proposal and requests a user decision. */
-    async function reviewProposal(ctx: ExtensionContext) {
-        if (!data.proposal) throw new Error("No stored proposal is available.");
-        const markdown = formatProposal(data.proposal);
-        if (!ctx.hasUI) {
-            return {
-                content: [
-                    { type: "text" as const, text: `Proposal stored. Approval requires a UI session.\n\n${markdown}` },
-                ],
-                details: {},
-            };
-        }
-        pi.appendEntry("plan-proposal", { markdown });
-        const choice = await ctx.ui.select("Review the proposal above", [
-            "Approve and implement",
-            "Request revision",
-            "Keep for later",
-        ]);
-        if (choice === "Approve and implement") {
-            transition(ctx, "implementing");
-            return {
-                content: [{ type: "text" as const, text: "Proposal approved. Begin implementation." }],
-                details: {},
-            };
-        }
-        if (choice === "Request revision") {
-            data.proposal = undefined;
-            data.waitingForUserFeedback = true;
-            setPlanStatus(ctx);
-            persistState();
-            return {
-                content: [
-                    {
-                        type: "text" as const,
-                        text: "Proposal rejected. Plan mode is waiting for your feedback. Describe the required changes before the agent asks questions or submits another proposal.",
-                    },
-                ],
-                details: {},
-            };
-        }
-        return { content: [{ type: "text" as const, text: "Proposal stored for later review." }], details: {} };
-    }
+    const controller = createPlanController({
+        getActiveTools: () => pi.getActiveTools(),
+        setActiveTools: (tools) => pi.setActiveTools(tools),
+        persist: (data) => pi.appendEntry("plan-mode", data),
+        sendUserMessage: (message) => pi.sendUserMessage(message),
+        appendDisplay: (type, data) => pi.appendEntry(type, data),
+        loadPrompt: loadPhasePrompt,
+    });
+
+    pi.registerTool({
+        name: "nushell",
+        label: "Nushell",
+        description: "Run direct Nushell commands; read-only during planning, unrestricted during implementation",
+        parameters: NUSHELL_SCHEMA,
+        async execute(_id, params, _signal, _update, _ctx) {
+            const { command } = params as { command: string };
+            return nushell.execute(command, { restricted: controller.isRestricted() });
+        },
+    });
 
     pi.registerTool({
         name: "plan_propose",
@@ -188,12 +65,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         description: "Submit one complete proposal for user review and approval",
         parameters: PLAN_PROPOSAL_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
-            requirePhase("brainstorming");
-            if (data.waitingForUserFeedback) throw new Error("Wait for the user to provide revision feedback first.");
-            requireCompleteProposal(params);
-            data.proposal = params;
-            persistState();
-            return reviewProposal(ctx);
+            return controller.propose(params, ctx);
         },
     });
 
@@ -203,16 +75,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         description: "Complete the approved proposal after implementation and checks",
         parameters: Type.Object({}),
         async execute(_id, _params, _signal, _update, ctx) {
-            requirePhase("implementing");
-            if (hasToolsInFlight()) {
-                throw new Error("plan_complete must run after all implementation tools finish.");
-            }
-            data.proposal = undefined;
-            transition(ctx, "brainstorming");
-            return {
-                content: [{ type: "text" as const, text: "Implementation complete. Brainstorming restored." }],
-                details: {},
-            };
+            return controller.complete(ctx);
         },
     });
 
@@ -222,142 +85,51 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         description: "Ask the user one or more choice questions before you submit a proposal",
         parameters: PLAN_ASK_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
-            requirePhase("brainstorming");
-            if (data.waitingForUserFeedback) throw new Error("Wait for the user to provide revision feedback first.");
-            if (!ctx.hasUI) {
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text: "Clarifying questions require a UI session; none is available.",
-                        },
-                    ],
-                    details: {},
-                };
-            }
-            const answers: Array<{ question: string; answer: string }> = [];
-            for (const item of params.questions) answers.push(await askQuestion(ctx, item.question, item.options));
-            const text = answers.map((entry) => `Q: ${entry.question}\nA: ${entry.answer}`).join("\n\n");
-            return { content: [{ type: "text" as const, text }], details: {} };
+            return controller.ask(params, ctx);
         },
     });
 
-    const subcommands: Record<string, (ctx: ExtensionContext) => void | Promise<void>> = {
-        async review(ctx) {
-            if (data.phase !== "brainstorming" || !data.proposal) {
-                ctx.ui.notify("No stored proposal is available for review.", "warning");
-                return;
-            }
-            await reviewProposal(ctx);
-        },
-        disable(ctx) {
-            if (data.phase === "off") {
-                ctx.ui.notify("Plan mode is already disabled.", "warning");
-                return;
-            }
-            if (hasToolsInFlight()) {
-                ctx.ui.notify("Plan mode: wait for implementation tools to finish before disabling.", "warning");
-                return;
-            }
-            transition(ctx, "off");
-        },
-    };
-
     pi.registerCommand("plan", {
         description: "Enter plan mode or run a phase command",
-        getArgumentCompletions: (prefix: string) => {
-            const matches = PHASES[data.phase].commands.filter((item) => item.value.startsWith(prefix));
-            return matches.length > 0 ? matches : null;
-        },
+        getArgumentCompletions: (prefix: string) => controller.completions(prefix),
         handler: async (args, ctx) => {
-            const command = args?.trim();
-            if (!command) {
-                if (data.phase === "off") transition(ctx, "brainstorming");
-                else ctx.ui.notify(`Already in plan mode (${data.phase}).`);
-                return;
-            }
-            const handler = subcommands[command];
-            if (!handler) {
-                ctx.ui.notify(`Unknown subcommand: ${args}`, "warning");
-                return;
-            }
-            await handler(ctx);
+            await controller.command(args, ctx);
         },
     });
 
     pi.on("input", (event, ctx) => {
         const source = (event as { source?: string }).source;
-        if (data.waitingForUserFeedback && source !== "extension") {
-            data.waitingForUserFeedback = undefined;
-            setPlanStatus(ctx as ExtensionContext);
-            persistState();
-        }
+        controller.handleInput(source, ctx as ExtensionContext);
         return { action: "continue" as const };
     });
 
-    pi.on("tool_call", (event) => {
-        if (data.phase !== "brainstorming" || event.toolName !== "bash") return;
-        const command = event.input.command;
-        if (typeof command !== "string" || !isAllowedInspectionCommand(command)) {
-            return { block: true, reason: `Plan mode: blocked — not a read-only command.\n${command}` };
-        }
-    });
-
     pi.on("tool_execution_start", (event) => {
-        if (data.phase === "implementing" && !CONTROL_TOOLS.has(event.toolName)) {
-            activeImplementationTools.add(event.toolCallId);
-        }
+        controller.onToolExecutionStart(event.toolCallId, event.toolName);
     });
 
     pi.on("tool_execution_end", (event) => {
-        activeImplementationTools.delete(event.toolCallId);
+        controller.onToolExecutionEnd(event.toolCallId);
     });
 
     pi.on("agent_settled", () => {
-        if (data.phase !== "implementing" || !data.proposal) return;
-        if (hasToolsInFlight() || hasNudgedForProposal) return;
-        hasNudgedForProposal = true;
-        pi.sendUserMessage(
-            "If every acceptance criterion is verified, call plan_complete now. If not, continue implementing.",
-        );
+        controller.onAgentSettled();
     });
 
     pi.on("before_agent_start", (event, ctx) => {
-        if (data.phase === "off") return;
-        const base = loadPhasePrompt(data.phase);
-        if (!base) {
-            if (!promptFailures.has(data.phase)) {
-                promptFailures.add(data.phase);
-                ctx.ui.notify(`Plan mode prompt is missing for phase: ${data.phase}`, "error");
-            }
-            return;
-        }
-        const contract =
-            data.phase === "implementing" && data.proposal ? `${base}\n\n${formatProposal(data.proposal)}` : base;
-        return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
+        return controller.beforeAgentStart(event.systemPrompt, ctx);
     });
 
     pi.on("session_shutdown", () => {
-        activeImplementationTools.clear();
-        if (data.phase !== "off") pi.setActiveTools(data.savedTools);
+        controller.onShutdown();
     });
 
     pi.on("session_start", (_event, ctx) => {
         promptCache.clear();
-        promptFailures.clear();
-        activeImplementationTools.clear();
         const entry = ctx.sessionManager
             .getBranch()
             .filter((candidate) => candidate.type === "custom" && candidate.customType === "plan-mode")
             .pop() as { data?: unknown } | undefined;
-        if (!entry) {
-            data = normalizePlanModeData(undefined, baseTools());
-            data.savedTools = baseTools();
-            transition(ctx, "brainstorming");
-            return;
-        }
-        data = normalizePlanModeData(entry.data, baseTools());
-        if (data.phase !== "off") pi.setActiveTools(toolsFor(data.phase));
-        setPlanStatus(ctx);
+        const data = entry ? normalizePlanModeData(entry.data, controller.baseTools()) : undefined;
+        controller.start(ctx, data);
     });
 }

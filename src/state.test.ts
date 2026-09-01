@@ -20,7 +20,6 @@ test("normalizes current persisted state", () => {
             phase: "implementing",
             proposal: PROPOSAL,
             savedTools: ["read", "bash", "edit"],
-            proposalOrigin: "current",
         },
     );
 });
@@ -28,7 +27,7 @@ test("normalizes current persisted state", () => {
 test("removes malformed structured proposals", () => {
     const data = normalizePlanModeData(
         {
-            phase: "planning",
+            phase: "brainstorming",
             proposal: { summary: "", files: [{ path: 1 }], steps: [] },
             savedTools: ["read"],
         },
@@ -39,7 +38,7 @@ test("removes malformed structured proposals", () => {
 
 test("removes proposals missing required brief PRD sections", () => {
     const { approach, ...withoutApproach } = PROPOSAL;
-    const data = normalizePlanModeData({ phase: "planning", proposal: withoutApproach, savedTools: ["read"] }, [
+    const data = normalizePlanModeData({ phase: "brainstorming", proposal: withoutApproach, savedTools: ["read"] }, [
         "read",
     ]);
     assert.equal(data.proposal, undefined);
@@ -50,36 +49,6 @@ test("preserves a pending proposal in brainstorming", () => {
     assert.deepEqual(data.proposal, PROPOSAL);
 });
 
-test("migrates an old planning proposal without file entries", () => {
-    const data = normalizePlanModeData(
-        {
-            phase: "planning",
-            proposal: {
-                title: "Legacy plan",
-                summary: "Complete legacy work",
-                problem: "The old workflow needs migration",
-                goals: ["Preserve the plan"],
-                requirements: ["Keep the approved scope"],
-                files: [],
-                steps: [{ title: "Migrate", description: "Run migration tests" }],
-                successCriteria: ["The proposal is preserved"],
-            },
-        },
-        ["read"],
-    );
-    assert.equal(data.phase, "brainstorming");
-    assert.equal(data.proposal?.changes.length, 1);
-});
-
-test("migrates legacy steps into a structured proposal", () => {
-    const data = normalizePlanModeData({ state: "planning", steps: [{ step: 8, text: "Legacy task" }] }, [
-        "read",
-        "bash",
-    ]);
-    assert.equal(data.proposal?.title, "Restored legacy proposal");
-    assert.equal(data.proposal?.approach, "Legacy task");
-});
-
 test("normalizes workflow invariants", () => {
     assert.equal(normalizePlanModeData({ phase: "off", proposal: PROPOSAL }, ["read"]).proposal, undefined);
     assert.deepEqual(
@@ -88,5 +57,29 @@ test("normalizes workflow invariants", () => {
     );
     assert.deepEqual(normalizePlanModeData({ phase: "implementing", proposal: PROPOSAL }, ["read"]).proposal, PROPOSAL);
     assert.equal(normalizePlanModeData({ phase: "implementing" }, ["read"]).phase, "brainstorming");
-    assert.equal(normalizePlanModeData({ phase: "planning", proposal: PROPOSAL }, ["read"]).phase, "brainstorming");
+    assert.equal(normalizePlanModeData({ phase: "planning", proposal: PROPOSAL }, ["read"]).phase, "off");
+});
+
+test("deduplicates and filters saved tools", () => {
+    const data = normalizePlanModeData({ phase: "off", savedTools: ["read", "read", "", 42, "edit"] }, ["fallback"]);
+    assert.deepEqual(data.savedTools, ["read", "edit"]);
+});
+
+test("falls back to active tools when saved tools are absent", () => {
+    const data = normalizePlanModeData({ phase: "off" }, ["read", "edit", "read"]);
+    assert.deepEqual(data.savedTools, ["read", "edit"]);
+});
+
+test("keeps revision feedback only in brainstorming", () => {
+    const brainstorming = normalizePlanModeData({ phase: "brainstorming", waitingForUserFeedback: true }, ["read"]);
+    assert.equal(brainstorming.waitingForUserFeedback, true);
+    const implementing = normalizePlanModeData(
+        { phase: "implementing", proposal: PROPOSAL, waitingForUserFeedback: true },
+        ["read"],
+    );
+    assert.equal(implementing.waitingForUserFeedback, undefined);
+    assert.equal(
+        normalizePlanModeData({ phase: "off", waitingForUserFeedback: true }, ["read"]).waitingForUserFeedback,
+        undefined,
+    );
 });

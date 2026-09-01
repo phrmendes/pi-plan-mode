@@ -1,6 +1,12 @@
 # Implementing
 
+The shell interface is the `nushell` tool. Write direct Nushell commands; do not wrap commands in `nu -c`.
+
+Use the `nushell` skill for Nushell syntax and structured-data work. Use the `ast-grep` skill for syntax-aware code search and analysis.
+
 Implement only the approved proposal.
+
+Implementation restores the approved tool set. You may use Nushell and external commands needed to complete the approved proposal. Keep work within the approved proposal.
 
 Run the relevant project checks. Check every acceptance criterion.
 

@@ -3,6 +3,7 @@ import { Type, type Static } from "typebox";
 export const PLAN_STATES = ["off", "brainstorming", "implementing"] as const;
 export type PlanState = (typeof PLAN_STATES)[number];
 
+/** Creates a required text schema with a field description. */
 const meaningful = (description: string) => Type.String({ minLength: 1, description });
 
 export const PLAN_PROPOSAL_SCHEMA = Type.Object({
@@ -28,26 +29,29 @@ export interface PlanModeData {
     proposal?: PlanProposal;
     savedTools: string[];
     waitingForUserFeedback?: boolean;
-    proposalOrigin?: "current" | "legacy";
 }
 
 const PLAN_STATE_SET = new Set<string>(PLAN_STATES);
 
+/** Normalizes the persisted tool list. */
 function normalizeTools(value: unknown, fallback: string[]): string[] {
     if (!Array.isArray(value)) return [...new Set(fallback)];
     return [...new Set(value.filter((tool): tool is string => typeof tool === "string" && tool.length > 0))];
 }
 
+/** Returns trimmed text when the value is meaningful. */
 function text(value: unknown): string | undefined {
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+/** Normalizes an array of meaningful text values. */
 function textArray(value: unknown): string[] | undefined {
     if (!Array.isArray(value)) return undefined;
     const items = value.map((item) => text(item));
     return items.some((item) => item === undefined) ? undefined : (items as string[]);
 }
 
+/** Normalizes every item in an object array. */
 function objectArray<T>(value: unknown, normalize: (item: Record<string, unknown>) => T | undefined): T[] | undefined {
     if (!Array.isArray(value)) return undefined;
     const items = value.map((item) =>
@@ -56,6 +60,7 @@ function objectArray<T>(value: unknown, normalize: (item: Record<string, unknown
     return items.some((item) => item === undefined) ? undefined : (items as T[]);
 }
 
+/** Normalizes a persisted proposal. */
 function normalizeProposal(value: unknown): PlanProposal | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const raw = value as Record<string, unknown>;
@@ -74,77 +79,21 @@ function normalizeProposal(value: unknown): PlanProposal | undefined {
     return { title, problem, outcome, approach, changes, acceptanceCriteria };
 }
 
-function normalizeDetailedProposal(value: unknown): PlanProposal | undefined {
-    if (typeof value !== "object" || value === null) return undefined;
-    const raw = value as Record<string, unknown>;
-    const title = text(raw.title);
-    const problem = text(raw.problem);
-    const outcome = text(raw.outcome) ?? text(raw.summary);
-    const approach = text(raw.approach) ?? textArray(raw.requirements)?.join("; ");
-    const acceptanceCriteria = textArray(raw.acceptanceCriteria) ?? textArray(raw.successCriteria);
-    const changes = objectArray(raw.changes ?? raw.files, (item) => {
-        const path = text(item.path);
-        const change = text(item.change) ?? text(item.reason);
-        return path && change ? { path, change } : undefined;
-    });
-    if (!title || !problem || !outcome || !approach || !acceptanceCriteria?.length) return undefined;
-    return {
-        title,
-        problem,
-        outcome,
-        approach,
-        changes: changes?.length ? changes : [{ path: "Unknown", change: "Complete the restored work" }],
-        acceptanceCriteria,
-    };
-}
-
-function normalizeLegacySteps(value: unknown): PlanProposal | undefined {
-    if (!Array.isArray(value)) return undefined;
-    const actions = value
-        .map((item) =>
-            typeof item === "object" && item !== null ? text((item as Record<string, unknown>).text) : undefined,
-        )
-        .filter((item): item is string => item !== undefined);
-    if (actions.length === 0) return undefined;
-    return {
-        title: "Restored legacy proposal",
-        problem: "A legacy proposal was restored without a recorded problem statement.",
-        outcome: "Complete the restored legacy work items.",
-        approach: actions.join("; "),
-        changes: [{ path: "Unknown", change: "Complete the restored legacy work" }],
-        acceptanceCriteria: ["All restored work items are complete"],
-    };
-}
-
+/** Normalizes current persisted plan state and enforces its invariants. */
 export function normalizePlanModeData(value: unknown, activeTools: string[]): PlanModeData {
     const raw = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-    const persistedPhase = typeof raw.phase === "string" ? raw.phase : raw.state;
+    const persistedPhase = raw.phase;
     let phase: PlanState =
-        persistedPhase === "planning"
-            ? "brainstorming"
-            : typeof persistedPhase === "string" && PLAN_STATE_SET.has(persistedPhase)
-              ? (persistedPhase as PlanState)
-              : raw.enabled
-                ? "brainstorming"
-                : "off";
-    const currentProposal = normalizeProposal(raw.proposal);
-    const migratedProposal = normalizeDetailedProposal(raw.proposal) ?? normalizeLegacySteps(raw.steps);
-    let proposal = currentProposal ?? migratedProposal;
-    let proposalOrigin: PlanModeData["proposalOrigin"] = currentProposal
-        ? "current"
-        : migratedProposal
-          ? "legacy"
-          : undefined;
-    if (phase === "off") {
-        proposal = undefined;
-        proposalOrigin = undefined;
-    }
-    if (phase === "implementing" && (!proposal || proposalOrigin === "legacy")) phase = "brainstorming";
+        typeof persistedPhase === "string" && PLAN_STATE_SET.has(persistedPhase)
+            ? (persistedPhase as PlanState)
+            : "off";
+    let proposal = normalizeProposal(raw.proposal);
+    if (phase === "off") proposal = undefined;
+    if (phase === "implementing" && !proposal) phase = "brainstorming";
     return {
         phase,
         ...(proposal ? { proposal } : {}),
         savedTools: normalizeTools(raw.savedTools, activeTools),
-        ...(raw.waitingForUserFeedback === true ? { waitingForUserFeedback: true } : {}),
-        ...(proposalOrigin ? { proposalOrigin } : {}),
+        ...(phase === "brainstorming" && raw.waitingForUserFeedback === true ? { waitingForUserFeedback: true } : {}),
     };
 }

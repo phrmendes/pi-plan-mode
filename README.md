@@ -56,24 +56,34 @@ Invalid state changes are rejected. `/plan review` reports when no proposal exis
 
 ## Permissions
 
-During brainstorming, the agent can use only `read`, approved inspection commands through `bash`, `plan_ask`, and `plan_propose`.
+While plan mode is enabled, `nushell` is the only shell tool. The built-in Bash tool is not active.
 
-The Bash policy allows only commands in a fixed inspection list. It blocks known write operations and unsupported shell syntax.
+During brainstorming, the agent can use only `read`, the read-only `nushell` tool, `plan_ask`, and `plan_propose`. The `nushell` tool accepts direct Nushell source and preserves `|` pipelines. It allows read-only Nushell built-ins and configured read-only external commands such as `git`, `gcloud`, `kubectl`, `uv`, `npm`, `pnpm`, and `ast-grep`. It blocks writes, redirects, package installation, publishing, cloud changes, Kubernetes changes, and other mutations.
 
-The Bash policy is not a security sandbox. Package-manager verification commands can run project-defined code. Install extensions and inspect projects only when you trust them.
+During implementation, the extension restores the saved non-shell tools and keeps the same `nushell` tool without the read-only restriction, along with `plan_complete`. Disabling plan mode restores the exact originally saved tools, including Bash when it was present.
 
-During implementation, the extension restores the tools saved when plan mode started and adds `plan_complete`. Disabling plan mode restores the saved tools. The extension also restores the tools before session reload, resume, or fork.
+The Nushell read-only policy is not a security sandbox. Package-manager verification commands can run project-defined code. Install extensions and inspect projects only when you trust them.
 
-## State and migration
+### Planning Nushell subset
 
-The active session branch stores:
+Brainstorming supports direct, top-level, read-only Nushell pipelines. It permits ordinary commands joined by `|` and quoted strings containing `|`.
+
+To keep planning inspection simple and read-only, it rejects closures, lists, records, parenthesized command expressions, interpolation, aliases, definitions, imports, overlays, redirects, and nested execution.
+
+## Skills
+
+The package bundles the `nushell` and `ast-grep` skills in `skills/`. Pi discovers package skills automatically. A configured skill with the same name can take precedence.
+
+Their top-level `SKILL.md` files include pi-plan-mode tool contracts for direct `nushell` tool use and phase-specific restrictions. Their reference files remain general on-demand documentation.
+
+## State
+
+The active session branch stores the current durable state:
 
 - The current phase.
 - The saved tools.
 - The pending proposal.
 - The revision-feedback state.
-
-Legacy planning sessions restore as brainstorming. The extension marks migrated proposals as legacy. A legacy proposal cannot enter implementation directly. Some old sessions do not contain file details. The migration can add synthetic details in this case.
 
 ## Install
 
