@@ -105,6 +105,22 @@ test("blocks mutations and unsupported planning commands", () => {
     for (const command of blocked) assert.equal(isAllowedPlanningCommand(command), false, command);
 });
 
+test("covers the planning capability matrix", () => {
+    const cases = [
+        ["file inspection", "open README.md | lines | first 20", true],
+        ["source search", 'open src/index.ts | lines | where $it =~ "registerTool"', true],
+        ["structured data", "open package.json | get scripts", true],
+        ["git history", "git log --oneline -5", true],
+        ["AST inspection", "ast-grep run --pattern 'foo($$$)' --lang typescript src", true],
+        ["test verification", "pnpm test", true],
+        ["file mutation", "touch new-file", false],
+        ["pipeline mutation", "ls | save report.txt", false],
+    ] as const;
+    for (const [name, command, expected] of cases) {
+        assert.equal(isAllowedPlanningCommand(command), expected, name);
+    }
+});
+
 function fakeRunner(results: Record<string, NushellProcessResult> = {}) {
     const calls: string[] = [];
     return {

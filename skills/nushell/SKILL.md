@@ -23,6 +23,17 @@ ls | where type == file | select name
 
 Do not use closures, lists, records, parenthesized command expressions, interpolation, aliases, definitions, imports, overlays, redirects, nested execution, or file and infrastructure mutations.
 
+Each nushell tool call runs in a separate process. Do not rely on `cd` from an earlier call; use explicit paths instead.
+
+Use these Nushell-native patterns instead of blocked Unix commands:
+
+```nu
+open README.md | lines | first 20
+open src/index.ts | lines | where $it =~ "registerTool"
+glob **/*.ts
+open package.json | get scripts
+```
+
 ### Implementing
 
 Implementation permits unrestricted direct Nushell source within the approved proposal.

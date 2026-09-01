@@ -123,6 +123,9 @@ test("fresh session enters brainstorming with restricted tools", () => {
     const h = startHarness();
     assert.equal(h.status, "plan: brainstorming");
     assert.deepEqual(h.activeTools, ["read", "nushell", "plan_propose", "plan_ask"]);
+    assert.ok(!h.activeTools.includes("bash"));
+    assert.ok(!h.activeTools.includes("edit"));
+    assert.ok(!h.activeTools.includes("write"));
 });
 
 test("approval restores non-shell tools and enables nushell and plan_complete", async () => {

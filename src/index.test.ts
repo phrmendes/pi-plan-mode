@@ -124,7 +124,25 @@ test("registers the plan control tools, nushell tool, command, and renderer", ()
     for (const name of ["nushell", "plan_propose", "plan_complete", "plan_ask"]) {
         assert.ok(h.toolDefinition(name), name);
     }
+    assert.ok(h.toolDefinition("nushell").renderCall);
     assert.ok(h.entryRenderers.has("plan-proposal"));
+});
+
+test("nushell renderer shows the command without changing tool output", () => {
+    const h = createHarness();
+    const renderer = h.toolDefinition("nushell").renderCall as (
+        args: unknown,
+        theme: { fg: (role: string, text: string) => string; bold: (text: string) => string },
+        context: { lastComponent?: unknown },
+    ) => { setText(text: string): void };
+    const rendered: { text?: string } = {};
+    const component = { setText: (text: string) => (rendered.text = text) };
+    renderer(
+        { command: "git status" },
+        { fg: (_role, text) => text, bold: (text) => text },
+        { lastComponent: component },
+    );
+    assert.equal(rendered.text, "Nushell $ git status");
 });
 
 test("plan_propose uses the durable proposal schema", () => {
