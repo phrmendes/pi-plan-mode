@@ -23,6 +23,11 @@ interface Entry {
 interface RegisteredTool {
     name: string;
     parameters: unknown;
+    renderCall?: (
+        args: unknown,
+        theme: { fg: (role: string, text: string) => string; bold: (text: string) => string },
+        context: { lastComponent?: unknown },
+    ) => { setText(text: string): void };
     execute(id: string, input: unknown, signal: undefined, update: undefined, ctx: unknown): Promise<unknown>;
 }
 
