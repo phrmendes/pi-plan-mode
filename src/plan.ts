@@ -203,7 +203,10 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         const choice = await ctx.ui.select(question, [...options, ASK_OTHER_OPTION]);
         if (choice !== undefined && choice !== ASK_OTHER_OPTION) return { question, answer: choice };
         const custom = await ctx.ui.input("Your answer:");
-        return { question, answer: custom && custom.trim().length > 0 ? custom.trim() : "No answer provided" };
+        return {
+            question,
+            answer: custom && custom.trim().length > 0 ? custom.trim() : "No answer provided",
+        };
     }
 
     /** Displays a proposal and handles the review decision. */
@@ -213,7 +216,10 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         if (!ctx.hasUI) {
             return {
                 content: [
-                    { type: "text" as const, text: `Proposal stored. Approval requires a UI session.\n\n${markdown}` },
+                    {
+                        type: "text" as const,
+                        text: `Proposal stored. Approval requires a UI session.\n\n${markdown}`,
+                    },
                 ],
                 details: {},
             };
@@ -246,7 +252,10 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
                 details: {},
             };
         }
-        return { content: [{ type: "text" as const, text: "Proposal stored for later review." }], details: {} };
+        return {
+            content: [{ type: "text" as const, text: "Proposal stored for later review." }],
+            details: {},
+        };
     }
 
     const controller: PlanController = {

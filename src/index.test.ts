@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import planMode from "./index.ts";
 import { PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanProposal } from "./state.ts";
-import type { NushellProcessResult } from "./nushell.ts";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
@@ -22,6 +22,7 @@ interface Entry {
 
 interface RegisteredTool {
     name: string;
+    description?: string;
     parameters: unknown;
     renderCall?: (
         args: unknown,
@@ -40,7 +41,7 @@ interface HarnessOptions {
     choices?: (string | undefined)[];
     loadPrompt?: (phase: string) => string | null;
     rejectStartupActions?: boolean;
-    nushellRunner?: (command: string) => Promise<NushellProcessResult>;
+    nushellOperations?: BashOperations;
 }
 
 function entry(data: unknown): Entry {
@@ -90,12 +91,22 @@ function createHarness(options: HarnessOptions = {}) {
         sessionManager: {
             getEntries: () => options.entries ?? options.branch ?? [],
             getBranch: () => options.branch ?? options.entries ?? [],
+            getSessionId: () => "test-session",
+            getSessionFile: () => undefined,
         },
     };
 
     planMode(pi as never, {
         loadPrompt: options.loadPrompt,
-        nushellRunner: options.nushellRunner ?? (async () => ({ stdout: "ran", stderr: "", exitCode: 0 })),
+        nushell: {
+            shellPath: "/bin/sh",
+            operations: options.nushellOperations ?? {
+                exec: async (_command, _cwd, execution) => {
+                    execution.onData(Buffer.from("ran"));
+                    return { exitCode: 0 };
+                },
+            },
+        },
     });
 
     return {
@@ -130,6 +141,7 @@ test("registers the plan control tools, nushell tool, command, and renderer", ()
         assert.ok(h.toolDefinition(name), name);
     }
     assert.ok(h.toolDefinition("nushell").renderCall);
+    assert.match(h.toolDefinition("nushell").description ?? "", /Pi.*shell backend.*Nushell/i);
     assert.ok(h.entryRenderers.has("plan-proposal"));
 });
 
@@ -222,9 +234,11 @@ test("nushell tool runs unrestricted commands during implementation", async () =
     const calls: string[] = [];
     const h = createHarness({
         entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-        nushellRunner: async (command) => {
-            calls.push(command);
-            return { stdout: "", stderr: "", exitCode: 0 };
+        nushellOperations: {
+            exec: async (command, _cwd, _execution) => {
+                calls.push(command);
+                return { exitCode: 0 };
+            },
         },
     });
     h.start();

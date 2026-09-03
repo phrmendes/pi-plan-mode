@@ -1,6 +1,6 @@
 ---
 name: nushell
-description: Use when writing or running Nushell commands, scripts, or pipelines - via Bash (nu -c) or in .nu script files. Also use when working with structured data (JSON, YAML, TOML, CSV, Parquet, SQLite), doing ad-hoc data analysis or exploration, or when the user's shell is Nushell.
+description: Use when writing or running Nushell commands, scripts, or pipelines with the `nushell` tool. Also use when working with structured data (JSON, YAML, TOML, CSV, Parquet, SQLite), doing ad-hoc data analysis or exploration, or when the user's shell is Nushell.
 ---
 
 # Using Nushell
@@ -9,11 +9,17 @@ Nushell is a structured-data shell. Commands pass **tables, records, and lists**
 
 ## pi-plan-mode Tool Contract
 
-When plan mode is enabled, use the custom `nushell` tool with direct Nushell source. Do not write `nu -c`; the tool runs Nushell internally.
+Use the `nushell` tool with direct Nushell source:
+
+```text
+nushell({ command: "ls | where type == file" })
+```
+
+Do not write `nu -c`; the tool runs the command through Pi's shell backend as `nu -c <command>`. The backend provides output streaming, timeouts, cancellation, output truncation, and process cleanup.
 
 ### Brainstorming
 
-Brainstorming permits only simple, top-level, read-only pipelines.
+Brainstorming permits only simple, top-level, read-only pipelines. Use `read` for direct file inspection and `nushell` for Nushell pipelines, structured data, Git, and read-only checks. Do not use Python or Bash when Nushell can perform the task.
 
 ```nu
 open package.json | get scripts
@@ -36,12 +42,7 @@ open package.json | get scripts
 
 ### Implementing
 
-Implementation permits unrestricted direct Nushell source within the approved proposal.
-
-**Execution path:**
-
-- **Standard Pi sessions**: Use the Bash tool with `nu -c '<code>'` for one-shot execution.
-- **pi-plan-mode**: Use the `nushell` tool with direct Nushell source.
+After proposal approval, `read`, `edit`, `write`, and `nushell` are available. Bash remains unavailable. Use `edit` and `write` for code and file changes. Use `nushell` for commands, tests, structured data, and shell workflows. Implementation permits unrestricted direct Nushell source within the approved proposal.
 
 ## Critical Rules
 
@@ -81,7 +82,9 @@ Gotcha: `$"(some text)"` errors - parens are evaluated as code. Escape literal p
 - Initial data science/analytics - histograms, tabular output, basic aggregations
 - Polars plugin for large datasets - DataFrames without Python overhead
 
-**Use Bash only when:** bash-specific tooling or Bash-specific integrations are required.
+**Use Python only when:** a Python-specific library is required and Nushell cannot perform the task.
+
+**Use Bash only when:** bash-specific tooling or Bash-specific integrations are required. Bash is not available through pi-plan-mode.
 
 ## Reference Files
 

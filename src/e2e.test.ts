@@ -35,7 +35,13 @@ async function createFakeModelSession(sessionManager: SessionManager) {
     const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
         agentDir: mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-")),
-        extensionFactories: [planMode, fauxProviderExtension],
+        extensionFactories: [
+            (pi) =>
+                planMode(pi, {
+                    nushell: { shellPath: process.env.PI_NUSHELL_PATH ?? "/run/current-system/sw/bin/nu" },
+                }),
+            fauxProviderExtension,
+        ],
     });
     await resourceLoader.reload();
 

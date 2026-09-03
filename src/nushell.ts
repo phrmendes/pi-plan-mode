@@ -1,41 +1,16 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { Type } from "typebox";
+import {
+    createBashToolDefinition,
+    type BashOperations,
+    type BashToolDetails,
+    type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
-const execFileAsync = promisify(execFile);
-
-export const NUSHELL_SCHEMA = Type.Object({
-    command: Type.String({ minLength: 1 }),
-});
-
-export interface NushellProcessResult {
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-}
-
-export type NushellRunner = (command: string) => Promise<NushellProcessResult>;
-
-export interface NushellToolResult {
-    content: Array<{ type: "text"; text: string }>;
-    details: Record<string, unknown>;
-}
-
-/** Runs direct Nushell source through the system `nu` executable. */
-export async function runNushellProcess(command: string): Promise<NushellProcessResult> {
-    try {
-        const { stdout, stderr } = await execFileAsync("nu", ["-c", command], {
-            maxBuffer: 10 * 1024 * 1024,
-        });
-        return { stdout, stderr, exitCode: 0 };
-    } catch (error) {
-        const failure = error as { stdout?: string; stderr?: string; code?: number | string };
-        return {
-            stdout: failure.stdout ?? "",
-            stderr: failure.stderr ?? (error instanceof Error ? error.message : String(error)),
-            exitCode: typeof failure.code === "number" ? failure.code : 1,
-        };
-    }
+export interface NushellToolOptions {
+    cwd: string;
+    shellPath?: string;
+    operations?: BashOperations;
+    isRestricted: () => boolean;
 }
 
 const NUSHELL_COMMANDS = new Set([
@@ -92,6 +67,7 @@ const NUSHELL_COMMANDS = new Set([
     "which",
     "zip",
 ]);
+
 const EXTERNAL_COMMANDS = new Set([
     "ast-grep",
     "diff",
@@ -106,6 +82,7 @@ const EXTERNAL_COMMANDS = new Set([
     "stat",
     "uv",
 ]);
+
 const BLOCKED_ARGUMENTS = new Set([
     "--exec",
     "--exec-batch",
@@ -120,6 +97,7 @@ const BLOCKED_ARGUMENTS = new Set([
     "-X",
     "-x",
 ]);
+
 const BLOCKED_COMMANDS = new Set([
     "alias",
     "def",
@@ -161,6 +139,7 @@ const BLOCKED_COMMANDS = new Set([
     "touch",
     "update",
 ]);
+
 const SAFE_EXTERNAL_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
     "ast-grep": new Set(["run", "scan"]),
     gcloud: new Set(["compute", "describe", "info", "list", "projects", "services", "version"]),
@@ -188,6 +167,7 @@ const SAFE_EXTERNAL_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> =
     pnpm: new Set(["list", "ls", "outdated", "run", "test"]),
     uv: new Set(["cache", "list", "pip", "python", "tool", "version"]),
 };
+
 const SAFE_RUN_SCRIPTS = new Set(["format:check", "lint", "test", "typecheck"]);
 
 /** Splits direct source at top-level Nushell pipeline boundaries. */
@@ -269,23 +249,35 @@ export function isAllowedPlanningCommand(command: string): boolean {
     return splitPipelines(command)?.every(isSafeStage) ?? false;
 }
 
-export interface NushellExecutor {
-    execute(command: string, options: { restricted: boolean }): Promise<NushellToolResult>;
-}
+/** Creates a Nushell-named tool backed by Pi's shell executor. */
+export function createNushellTool(
+    options: NushellToolOptions,
+): ToolDefinition<ReturnType<typeof createBashToolDefinition>["parameters"], BashToolDetails | undefined, unknown> {
+    const backend = createBashToolDefinition(options.cwd, {
+        shellPath: options.shellPath ?? "nu",
+        operations: options.operations,
+    });
 
-/** Creates a Nushell executor with optional process injection. */
-export function createNushellExecutor(runner: NushellRunner = runNushellProcess): NushellExecutor {
     return {
-        async execute(command: string, options: { restricted: boolean }): Promise<NushellToolResult> {
-            if (options.restricted && !isAllowedPlanningCommand(command)) {
-                throw new Error(`Plan mode: blocked — not a read-only command.\n${command}`);
-            }
-            const result = await runner(command);
-            const text = [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd();
-            return {
-                content: [{ type: "text", text: text || "(no output)" }],
-                details: { exitCode: result.exitCode },
-            };
+        ...backend,
+        name: "nushell",
+        label: "Nushell",
+        description:
+            "Use Pi's shell backend to execute Nushell commands. Commands are read-only during planning and unrestricted during implementation.",
+        renderCall(input, theme, context) {
+            const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+            text.setText(theme.fg("toolTitle", theme.bold("Nushell ")) + theme.fg("muted", `$ ${input.command}`));
+            return text;
         },
-    };
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
+            if (options.isRestricted() && !isAllowedPlanningCommand(params.command)) {
+                throw new Error(`Plan mode: blocked — not a read-only command.\n${params.command}`);
+            }
+            return backend.execute(toolCallId, params, signal, onUpdate, ctx);
+        },
+    } as ToolDefinition<
+        ReturnType<typeof createBashToolDefinition>["parameters"],
+        BashToolDetails | undefined,
+        unknown
+    >;
 }

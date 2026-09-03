@@ -1,14 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-    bulletSection,
-    createPlanController,
-    formatProposal,
-    requireCompleteProposal,
-    type PlanController,
-    type PlanToolResult,
-} from "./plan.ts";
+import { bulletSection, createPlanController, formatProposal, requireCompleteProposal } from "./plan.ts";
 import type { PlanModeData, PlanProposal, PlanState } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];

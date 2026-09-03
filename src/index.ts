@@ -1,20 +1,19 @@
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Markdown, Text } from "@earendil-works/pi-tui";
+import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
-import { createNushellExecutor, NUSHELL_SCHEMA, type NushellRunner } from "./nushell.ts";
+import { createNushellTool, type NushellToolOptions } from "./nushell.ts";
 import { createPlanController, PLAN_ASK_SCHEMA } from "./plan.ts";
 import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanState } from "./state.ts";
 
 export interface PlanModeOptions {
     loadPrompt?: (phase: PlanState) => string | null;
-    nushellRunner?: NushellRunner;
+    nushell?: Omit<NushellToolOptions, "isRestricted" | "cwd">;
 }
 
 /** Registers the agent-driven plan workflow. */
 export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
     const promptCache = new Map<PlanState, string>();
-    const nushell = createNushellExecutor(options.nushellRunner);
 
     pi.registerEntryRenderer("plan-proposal", (entry) => {
         const proposal = entry.data as { markdown: string };
@@ -48,22 +47,14 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         loadPrompt: loadPhasePrompt,
     });
 
-    pi.registerTool({
-        name: "nushell",
-        label: "Nushell",
-        description: "Run direct Nushell commands; read-only during planning, unrestricted during implementation",
-        parameters: NUSHELL_SCHEMA,
-        renderCall(args, theme, context) {
-            const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-            const command = (args as { command?: string }).command ?? "";
-            text.setText(theme.fg("toolTitle", theme.bold("Nushell ")) + theme.fg("muted", `$ ${command}`));
-            return text;
-        },
-        async execute(_id, params, _signal, _update, _ctx) {
-            const { command } = params as { command: string };
-            return nushell.execute(command, { restricted: controller.isRestricted() });
-        },
-    });
+    pi.registerTool(
+        createNushellTool({
+            cwd: process.cwd(),
+            shellPath: options.nushell?.shellPath ?? process.env.PI_NUSHELL_PATH ?? "nu",
+            operations: options.nushell?.operations,
+            isRestricted: () => controller.isRestricted(),
+        }),
+    );
 
     pi.registerTool({
         name: "plan_propose",

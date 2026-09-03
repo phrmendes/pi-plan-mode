@@ -37,7 +37,7 @@ test("removes malformed structured proposals", () => {
 });
 
 test("removes proposals missing required brief PRD sections", () => {
-    const { approach, ...withoutApproach } = PROPOSAL;
+    const { approach: _approach, ...withoutApproach } = PROPOSAL;
     const data = normalizePlanModeData({ phase: "brainstorming", proposal: withoutApproach, savedTools: ["read"] }, [
         "read",
     ]);
