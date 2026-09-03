@@ -19,7 +19,7 @@ Do not write `nu -c`; the tool runs the command through Pi's shell backend as `n
 
 ### Brainstorming
 
-Brainstorming permits only simple, top-level, read-only pipelines. Use `read` for direct file inspection and `nushell` for Nushell pipelines, structured data, Git, and read-only checks. Do not use Python or Bash when Nushell can perform the task.
+During brainstorming, `nushell` uses a simple deny-list. Normal Nushell syntax and read-only commands are allowed. Commands containing known mutation or execution-escape tokens are blocked before execution. Use `read` for direct file inspection and `nushell` for Nushell pipelines, structured data, Git, and read-only checks. Do not use Python or Bash when Nushell can perform the task. This is a workflow guard, not a security sandbox.
 
 ```nu
 open package.json | get scripts
