@@ -29,6 +29,17 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         }
     }
 
+    /** Reads the bundled instructions that apply to every agent turn. */
+    function readAgentInstructions(): string | null {
+        try {
+            return readFileSync(new URL("../prompts/instructions.md", import.meta.url), "utf8");
+        } catch {
+            return null;
+        }
+    }
+
+    const agentInstructions = readAgentInstructions();
+
     /** Loads and caches the prompt contract for a phase. */
     function loadPhasePrompt(phase: PlanState): string | null {
         const cached = promptCache.get(phase);
@@ -113,7 +124,10 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     });
 
     pi.on("before_agent_start", (event, ctx) => {
-        return controller.beforeAgentStart(event.systemPrompt, ctx);
+        const planPrompt = controller.beforeAgentStart(event.systemPrompt, ctx);
+        const systemPrompt = planPrompt?.systemPrompt ?? event.systemPrompt;
+        if (!agentInstructions) return planPrompt;
+        return { systemPrompt: `${systemPrompt}\n\n${agentInstructions}` };
     });
 
     pi.on("session_shutdown", () => {

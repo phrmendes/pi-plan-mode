@@ -8,7 +8,6 @@ const allowed = [
     "ls | each { |item| $item.name }",
     "git status",
     "open package.json | get scripts",
-    "ast-grep run --pattern 'foo($$$)' --lang typescript src",
     "quoted = 'save report.txt'",
     "open 'save report.txt'",
     "echo documentation.md",
@@ -25,7 +24,7 @@ const blocked = [
     "python script.py",
     "bash -c 'rm -rf build'",
     "do { ^kubectl delete pod $item }",
-    "ast-grep run --rewrite rule.yml .",
+    "echo --rewrite rule.yml .",
     "run-external rm",
     "echo output --exec",
 ];

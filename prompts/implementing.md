@@ -2,7 +2,7 @@
 
 The shell interface is the `nushell` tool. Write direct Nushell commands; do not wrap commands in `nu -c`.
 
-Use the `nushell` skill for Nushell syntax and structured-data work. Use the `ast-grep` skill for syntax-aware code search and analysis.
+Use the `nushell` skill for Nushell syntax and structured-data work.
 
 Implement only the approved proposal.
 

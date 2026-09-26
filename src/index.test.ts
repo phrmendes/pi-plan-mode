@@ -261,6 +261,15 @@ test("tool lifecycle events are wired to implementation tracking", async () => {
     assert.equal(h.status, "plan: brainstorming");
 });
 
+test("injects bundled instructions on every agent turn", () => {
+    const h = createHarness({ entries: [entry({ phase: "off", savedTools: FULL_TOOLS })] });
+    h.start();
+    const result = h.beforeAgentStart();
+    assert.match(result?.systemPrompt ?? "", /# Instructions/);
+    assert.match(result?.systemPrompt ?? "", /Answer in 1–4 sentences by default/);
+    assert.match(result?.systemPrompt ?? "", /State facts and results\. Do not speculate/);
+});
+
 test("prompt composition is turn-local system text", () => {
     const h = createHarness();
     h.start();
