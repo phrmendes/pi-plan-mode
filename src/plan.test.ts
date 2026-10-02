@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { bulletSection, createPlanController, formatProposal, requireCompleteProposal } from "./plan.ts";
+import { createPlanController, formatProposal } from "./plan.ts";
 import type { PlanModeData, PlanProposal, PlanState } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
+const MCP_TOOLS = ["mcp__agent_browser__open", "mcp__agent_browser__click", "mcp__nushell__evaluate"];
+const ALL_TOOLS = [...FULL_TOOLS, ...MCP_TOOLS];
 const PROPOSAL: PlanProposal = {
     title: "Improve flow",
     problem: "The flow is hard to follow",
@@ -87,15 +89,6 @@ function startHarness(options: PlanHarnessOptions = {}) {
     return harness;
 }
 
-test("bulletSection omits the heading when there are no items", () => {
-    assert.equal(bulletSection("Notes", []), "");
-    assert.equal(bulletSection("Notes", undefined), "");
-});
-
-test("bulletSection renders one bullet per item under the heading", () => {
-    assert.equal(bulletSection("Notes", ["a", "b"]), "\n\n## Notes\n- a\n- b");
-});
-
 test("formatProposal renders every section of the proposal", () => {
     const markdown = formatProposal(PROPOSAL);
     assert.match(markdown, /^# Improve flow/);
@@ -104,28 +97,20 @@ test("formatProposal renders every section of the proposal", () => {
     assert.match(markdown, /## Acceptance Criteria\n- One tool submits the proposal/);
 });
 
-test("requireCompleteProposal accepts a fully specified proposal", () => {
-    assert.doesNotThrow(() => requireCompleteProposal(PROPOSAL));
-});
-
-test("requireCompleteProposal rejects placeholder content", () => {
-    assert.throws(() => requireCompleteProposal({ ...PROPOSAL, approach: "TBD" }), /placeholder/i);
-});
-
-test("fresh session enters brainstorming with restricted tools", () => {
+test("fresh session enters brainstorming with the restricted tool set", () => {
     const h = startHarness();
     assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, ["read", "nushell", "plan_propose", "plan_ask"]);
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
     assert.ok(!h.activeTools.includes("bash"));
     assert.ok(!h.activeTools.includes("edit"));
     assert.ok(!h.activeTools.includes("write"));
 });
 
-test("approval restores non-shell tools and enables nushell and plan_complete", async () => {
+test("approval restores the saved tools and enables plan_complete", async () => {
     const h = startHarness({ choices: ["Approve and implement"] });
     await h.controller.propose(PROPOSAL, h.ctx);
     assert.equal(h.status, "plan: implementing");
-    assert.deepEqual(h.activeTools, ["read", "edit", "write", "nushell", "plan_complete"]);
+    assert.deepEqual(h.activeTools, ["read", "bash", "edit", "write", "plan_complete"]);
     assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
     assert.deepEqual(h.displays, [{ markdown: formatProposal(PROPOSAL) }]);
 });
@@ -141,6 +126,13 @@ test("propose stores and returns the formatted proposal without UI", async () =>
 test("propose rejects placeholder content", async () => {
     const h = startHarness();
     await assert.rejects(h.controller.propose({ ...PROPOSAL, approach: "TBD" }, h.ctx), /placeholder/i);
+});
+
+test("propose accepts legitimate words that resemble placeholders", async () => {
+    const h = startHarness();
+    const proposal = { ...PROPOSAL, acceptanceCriteria: ["Handle unknown host names and CSV, JSON, etc."] };
+    await h.controller.propose(proposal, h.ctx);
+    assert.deepEqual(h.persisted.at(-1)?.proposal, proposal);
 });
 
 test("requesting revision clears the pending proposal and waits for feedback", async () => {
@@ -169,15 +161,15 @@ test("deferring preserves the proposal for plan review", async () => {
     assert.equal(h.status, "plan: implementing");
 });
 
-test("plan_complete returns to brainstorming and clears the proposal", async () => {
+test("plan_complete disables plan mode and clears the proposal", async () => {
     const h = startHarness({
         data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
     });
     const result = await h.controller.complete(h.ctx);
-    assert.match(result.content[0].text, /Brainstorming restored/);
-    assert.equal(h.status, "plan: brainstorming");
+    assert.match(result.content[0].text, /disabled/);
+    assert.equal(h.status, undefined);
     assert.equal(h.persisted.at(-1)?.proposal, undefined);
-    assert.deepEqual(h.activeTools, ["read", "nushell", "plan_propose", "plan_ask"]);
+    assert.deepEqual(h.activeTools, FULL_TOOLS);
 });
 
 test("plan_complete waits for implementation tools to finish", async () => {
@@ -188,7 +180,7 @@ test("plan_complete waits for implementation tools to finish", async () => {
     await assert.rejects(h.controller.complete(h.ctx), /after all implementation tools finish/i);
     h.controller.onToolExecutionEnd("edit-1");
     await h.controller.complete(h.ctx);
-    assert.equal(h.status, "plan: brainstorming");
+    assert.equal(h.status, undefined);
 });
 
 test("agent_settled reminds once when idle mid-implementation", async () => {
@@ -283,22 +275,48 @@ test("prompt composition appends the proposal during implementation", () => {
     assert.match(result?.systemPrompt ?? "", /## Problem\nThe flow is hard to follow/);
 });
 
-test("brainstorming reports the restricted shell state", () => {
-    const h = startHarness();
-    assert.equal(h.controller.isRestricted(), true);
+test("brainstorming keeps the read-only search tools and every agent-browser MCP tool", () => {
+    const h = startHarness({ tools: ALL_TOOLS });
+    assert.deepEqual(h.activeTools, [
+        "read",
+        "grep",
+        "ls",
+        "find",
+        "mcp__agent_browser__open",
+        "mcp__agent_browser__click",
+        "plan_propose",
+        "plan_ask",
+    ]);
 });
 
-test("implementation reports an unrestricted shell state", () => {
-    const h = startHarness({
-        data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
-    });
-    assert.equal(h.controller.isRestricted(), false);
+test("brainstorming excludes shell, editing, and nushell MCP tools", () => {
+    const h = startHarness({ tools: ALL_TOOLS });
+    for (const name of ["bash", "edit", "write", "mcp__nushell__evaluate"]) {
+        assert.ok(!h.activeTools.includes(name), name);
+    }
 });
 
-test("shutdown restores the originally saved tools", () => {
+test("implementation enables every saved tool", () => {
     const h = startHarness({
-        data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
     });
-    h.controller.onShutdown();
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
+    assert.deepEqual(h.activeTools, [...ALL_TOOLS, "plan_complete"]);
+});
+
+test("brainstorming blocks every tool outside the read and agent-browser allowlist", () => {
+    const h = startHarness({ tools: ALL_TOOLS });
+    for (const allowed of ["read", "grep", "ls", "find", "mcp__agent_browser__open", "plan_propose"]) {
+        assert.equal(h.controller.blockReason(allowed), undefined, allowed);
+    }
+    assert.match(h.controller.blockReason("bash") ?? "", /not available/i);
+    assert.match(h.controller.blockReason("edit") ?? "", /not available/i);
+    assert.match(h.controller.blockReason("mcp__nushell__evaluate") ?? "", /not available/i);
+});
+
+test("implementation does not block tool calls", () => {
+    const h = startHarness({
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
+    });
+    assert.equal(h.controller.blockReason("bash"), undefined);
+    assert.equal(h.controller.blockReason("mcp__nushell__evaluate"), undefined);
 });

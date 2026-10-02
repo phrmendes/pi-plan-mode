@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import planMode from "./index.ts";
-import { PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanProposal } from "./state.ts";
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import type { PlanModeData, PlanProposal } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
@@ -41,7 +40,6 @@ interface HarnessOptions {
     choices?: (string | undefined)[];
     loadPrompt?: (phase: string) => string | null;
     rejectStartupActions?: boolean;
-    nushellOperations?: BashOperations;
 }
 
 function entry(data: unknown): Entry {
@@ -98,15 +96,6 @@ function createHarness(options: HarnessOptions = {}) {
 
     planMode(pi as never, {
         loadPrompt: options.loadPrompt,
-        nushell: {
-            shellPath: "/bin/sh",
-            operations: options.nushellOperations ?? {
-                exec: async (_command, _cwd, execution) => {
-                    execution.onData(Buffer.from("ran"));
-                    return { exitCode: 0 };
-                },
-            },
-        },
     });
 
     return {
@@ -135,58 +124,19 @@ function createHarness(options: HarnessOptions = {}) {
     };
 }
 
-test("registers the plan control tools, nushell tool, command, and renderer", () => {
+test("registers the plan control tools, command, and renderer", () => {
     const h = createHarness();
-    for (const name of ["nushell", "plan_propose", "plan_complete", "plan_ask"]) {
+    for (const name of ["plan_propose", "plan_complete", "plan_ask"]) {
         assert.ok(h.toolDefinition(name), name);
     }
-    assert.ok(h.toolDefinition("nushell").renderCall);
-    assert.match(h.toolDefinition("nushell").description ?? "", /Pi.*shell backend.*Nushell/i);
+    assert.equal(h.toolDefinition("nushell"), undefined);
     assert.ok(h.entryRenderers.has("plan-proposal"));
-});
-
-test("nushell renderer shows the command without changing tool output", () => {
-    const h = createHarness();
-    const renderer = h.toolDefinition("nushell").renderCall as (
-        args: unknown,
-        theme: { fg: (role: string, text: string) => string; bold: (text: string) => string },
-        context: { lastComponent?: unknown },
-    ) => { setText(text: string): void };
-    const rendered: { text?: string } = {};
-    const component = { setText: (text: string) => (rendered.text = text) };
-    renderer(
-        { command: "git status" },
-        { fg: (_role, text) => text, bold: (text) => text },
-        { lastComponent: component },
-    );
-    assert.equal(rendered.text, "Nushell $ git status");
-});
-
-test("plan_propose uses the durable proposal schema", () => {
-    const h = createHarness();
-    assert.equal(h.toolDefinition("plan_propose").parameters, PLAN_PROPOSAL_SCHEMA);
 });
 
 test("extension registration does not call runtime action methods", () => {
     const h = createHarness({ rejectStartupActions: true });
     h.start();
     assert.equal(h.status, "plan: brainstorming");
-});
-
-test("fresh session enters brainstorming with nushell instead of bash", () => {
-    const h = createHarness();
-    h.start();
-    assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, ["read", "nushell", "plan_propose", "plan_ask"]);
-    assert.ok(!h.activeTools.includes("bash"));
-});
-
-test("implementation restores non-shell tools and excludes bash", async () => {
-    const dynamicTools = [...FULL_TOOLS, "dynamic-tool"];
-    const h = createHarness({ tools: dynamicTools, choices: ["Approve and implement"] });
-    h.start();
-    await h.tool("plan_propose", PROPOSAL);
-    assert.deepEqual(h.activeTools, ["read", "edit", "write", "dynamic-tool", "nushell", "plan_complete"]);
 });
 
 test("restored off state does not change tools", () => {
@@ -215,38 +165,20 @@ test("restores state from the active branch", () => {
     assert.equal(h.status, "plan: brainstorming");
 });
 
-test("nushell tool blocks mutations during brainstorming", async () => {
+test("brainstorming blocks a disallowed tool through the tool_call event", () => {
     const h = createHarness();
     h.start();
-    await assert.rejects(h.tool("nushell", { command: "ls | save report.txt" }), /blocked/i);
+    const result = h.emit("tool_call", { toolName: "mcp__nushell__evaluate" }) as
+        { block?: boolean; reason?: string } | undefined;
+    assert.equal(result?.block, true);
+    assert.match(result?.reason ?? "", /not available/i);
 });
 
-test("nushell tool runs allowed planning commands through the runner", async () => {
+test("brainstorming allows read and agent-browser through the tool_call event", () => {
     const h = createHarness();
     h.start();
-    const result = (await h.tool("nushell", { command: "open package.json | get scripts" })) as {
-        content: Array<{ text: string }>;
-    };
-    assert.equal(result.content[0].text, "ran");
-});
-
-test("nushell tool runs unrestricted commands during implementation", async () => {
-    const calls: string[] = [];
-    const h = createHarness({
-        entries: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
-        nushellOperations: {
-            exec: async (command, _cwd, _execution) => {
-                calls.push(command);
-                return { exitCode: 0 };
-            },
-        },
-    });
-    h.start();
-    const result = (await h.tool("nushell", { command: "rm -r build" })) as {
-        content: Array<{ text: string }>;
-    };
-    assert.equal(result.content[0].text, "(no output)");
-    assert.deepEqual(calls, ["rm -r build"]);
+    assert.equal(h.emit("tool_call", { toolName: "read" }), undefined);
+    assert.equal(h.emit("tool_call", { toolName: "mcp__agent_browser__open" }), undefined);
 });
 
 test("tool lifecycle events are wired to implementation tracking", async () => {
@@ -258,16 +190,7 @@ test("tool lifecycle events are wired to implementation tracking", async () => {
     await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
     h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
     await h.tool("plan_complete");
-    assert.equal(h.status, "plan: brainstorming");
-});
-
-test("injects bundled instructions on every agent turn", () => {
-    const h = createHarness({ entries: [entry({ phase: "off", savedTools: FULL_TOOLS })] });
-    h.start();
-    const result = h.beforeAgentStart();
-    assert.match(result?.systemPrompt ?? "", /# Instructions/);
-    assert.match(result?.systemPrompt ?? "", /Answer in 1–4 sentences by default/);
-    assert.match(result?.systemPrompt ?? "", /State facts and results\. Do not speculate/);
+    assert.equal(h.status, undefined);
 });
 
 test("prompt composition is turn-local system text", () => {

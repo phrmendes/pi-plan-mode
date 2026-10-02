@@ -44,11 +44,6 @@ test("removes proposals missing required brief PRD sections", () => {
     assert.equal(data.proposal, undefined);
 });
 
-test("preserves a pending proposal in brainstorming", () => {
-    const data = normalizePlanModeData({ phase: "brainstorming", proposal: PROPOSAL, savedTools: ["read"] }, ["read"]);
-    assert.deepEqual(data.proposal, PROPOSAL);
-});
-
 test("normalizes workflow invariants", () => {
     assert.equal(normalizePlanModeData({ phase: "off", proposal: PROPOSAL }, ["read"]).proposal, undefined);
     assert.deepEqual(

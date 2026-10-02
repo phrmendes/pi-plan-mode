@@ -35,13 +35,7 @@ async function createFakeModelSession(sessionManager: SessionManager) {
     const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
         agentDir: mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-")),
-        extensionFactories: [
-            (pi) =>
-                planMode(pi, {
-                    nushell: { shellPath: process.env.PI_NUSHELL_PATH ?? "/run/current-system/sw/bin/nu" },
-                }),
-            fauxProviderExtension,
-        ],
+        extensionFactories: [(pi) => planMode(pi, {}), fauxProviderExtension],
     });
     await resourceLoader.reload();
 
@@ -83,80 +77,6 @@ test("brainstorming: a real agent turn calling plan_propose surfaces the formatt
     session.dispose();
 });
 
-test("brainstorming: the real nushell tool executes a direct Nushell pipeline", async () => {
-    const sessionManager = SessionManager.inMemory();
-    const { session, faux } = await createFakeModelSession(sessionManager);
-
-    faux.setResponses([
-        fauxAssistantMessage([fauxToolCall("nushell", { command: "echo hello | str uppercase" })], {
-            stopReason: "toolUse",
-        }),
-        fauxAssistantMessage("Pipeline verified.", { stopReason: "stop" }),
-    ]);
-
-    await session.prompt("Run a safe Nushell pipeline.");
-
-    assert.match(JSON.stringify(sessionManager.getEntries()), /HELLO/);
-    session.dispose();
-});
-
-test("brainstorming: the real nushell tool rejects a write before execution", async () => {
-    const sessionManager = SessionManager.inMemory();
-    const { session, faux } = await createFakeModelSession(sessionManager);
-
-    faux.setResponses([
-        fauxAssistantMessage([fauxToolCall("nushell", { command: "print forbidden | save output.txt" })], {
-            stopReason: "toolUse",
-        }),
-        fauxAssistantMessage("The command was blocked.", { stopReason: "stop" }),
-    ]);
-
-    await session.prompt("Try a forbidden planning command.");
-
-    assert.match(JSON.stringify(sessionManager.getEntries()), /not a read-only command/i);
-    session.dispose();
-});
-
-test("implementing: the real nushell tool runs without the planning policy", async () => {
-    const sessionManager = SessionManager.inMemory();
-    sessionManager.appendCustomEntry("plan-mode", {
-        phase: "implementing",
-        proposal: PROPOSAL,
-        savedTools: FULL_TOOLS,
-    });
-    const { session, faux } = await createFakeModelSession(sessionManager);
-
-    faux.setResponses([
-        fauxAssistantMessage([fauxToolCall("nushell", { command: "echo unrestricted" })], {
-            stopReason: "toolUse",
-        }),
-        fauxAssistantMessage("Nushell is unrestricted during implementation.", { stopReason: "stop" }),
-    ]);
-
-    await session.prompt("Run an implementation shell command.");
-
-    assert.match(JSON.stringify(sessionManager.getEntries()), /unrestricted/);
-    session.dispose();
-});
-
-test("the real nushell tool runs in the project working directory", async () => {
-    const sessionManager = SessionManager.inMemory();
-    const { session, faux } = await createFakeModelSession(sessionManager);
-
-    faux.setResponses([
-        fauxAssistantMessage([fauxToolCall("nushell", { command: "pwd" })], { stopReason: "toolUse" }),
-        fauxAssistantMessage("Working directory verified.", { stopReason: "stop" }),
-    ]);
-
-    await session.prompt("Show the project directory.");
-
-    assert.match(
-        JSON.stringify(sessionManager.getEntries()),
-        new RegExp(process.cwd().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")),
-    );
-    session.dispose();
-});
-
 test(
     "implementing: the agent_settled reminder brings a silently-idle agent back to call plan_complete",
     { timeout: 5000 },
@@ -179,24 +99,24 @@ test(
 
         // The reminder fires asynchronously after the first turn settles, so wait for its effect
         // (plan_complete reverting the phase) rather than for a specific count of framework events.
-        const phaseRevertedToBrainstorming = new Promise<void>((resolve) => {
-            if (lastPlanModeEntry(sessionManager)?.phase === "brainstorming") {
+        const planModeDisabled = new Promise<void>((resolve) => {
+            if (lastPlanModeEntry(sessionManager)?.phase === "off") {
                 resolve();
                 return;
             }
             const unsubscribe = session.subscribe((event) => {
                 if (event.type !== "entry_appended") return;
-                if (lastPlanModeEntry(sessionManager)?.phase !== "brainstorming") return;
+                if (lastPlanModeEntry(sessionManager)?.phase !== "off") return;
                 unsubscribe();
                 resolve();
             });
         });
 
         await session.prompt("Implement the approved proposal.");
-        await phaseRevertedToBrainstorming;
+        await planModeDisabled;
 
         assert.ok(faux.state.callCount >= 2, "the reminder should have triggered a second model turn");
-        assert.equal(lastPlanModeEntry(sessionManager)?.phase, "brainstorming");
+        assert.equal(lastPlanModeEntry(sessionManager)?.phase, "off");
 
         session.dispose();
     },
