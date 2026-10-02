@@ -19,8 +19,9 @@
     ],
     "type": "module",
     "scripts": {
-        "test": "node --test src/index.test.ts src/plan.test.ts src/state.test.ts",
+        "test": "node --test src/config.test.ts src/index.test.ts src/plan.test.ts src/state.test.ts",
         "test:e2e": "node --test src/e2e.test.ts",
+        "check": "pnpm run typecheck && pnpm run format:check && pnpm test && pnpm run test:e2e",
         "typecheck": "tsc -p tsconfig.json",
         "format": "prettier --write src/",
         "format:check": "prettier --check src/",
@@ -34,13 +35,9 @@
     "devDependencies": {
         "@earendil-works/pi-ai": "latest",
         "@earendil-works/pi-coding-agent": "latest",
+        "@earendil-works/pi-tui": "latest",
         "prettier": "^3.9.6",
         "typescript": "latest"
-    },
-    "overrides": {
-        "@earendil-works/pi-coding-agent": {
-            "brace-expansion": "^5.0.8"
-        }
     },
     "packageManager": "pnpm@11.17.0",
     "pi": {

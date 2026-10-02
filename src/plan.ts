@@ -13,6 +13,7 @@ interface PlanToolResult {
 }
 
 interface PlanControllerDeps {
+    getAllowedTools(): string[];
     getActiveTools(): string[];
     setActiveTools(tools: string[]): void;
     persist(data: PlanModeData): void;
@@ -25,6 +26,7 @@ interface PlanController {
     baseTools(): string[];
     blockReason(toolName: string): string | undefined;
     start(ctx: ExtensionContext, data?: PlanModeData): void;
+    resume(ctx: ExtensionContext, data: PlanModeData): void;
     propose(proposal: PlanProposal, ctx: ExtensionContext): Promise<PlanToolResult>;
     ask(
         questions: { questions: Array<{ question: string; options: string[] }> },
@@ -48,13 +50,12 @@ export const PLAN_TOOLS = {
 } as const;
 
 const CONTROL_TOOLS = new Set<string>(Object.values(PLAN_TOOLS));
-const BRAINSTORMING_TOOLS = ["read", "grep", "ls", "find"];
-const BRAINSTORMING_MCP_PREFIX = "mcp__agent_browser__";
+const DISCOVERY_TOOLS = ["read", "grep", "ls", "find"];
 const PLACEHOLDER_VALUE = /^(?:tbd|todo|n\/a|na|none|unknown|as needed|etc\.?)$/i;
 const ASK_OTHER_OPTION = "Other (type your own)";
-const REVIEW_APPROVE = "Approve and implement";
-const REVIEW_REVISE = "Request revision";
-const REVIEW_DEFER = "Keep for later";
+const REVIEW_ACCEPT = "Accept and implement";
+const REVIEW_REJECT = "Reject";
+const REVIEW_DEFER = "Ask for review";
 
 export const PLAN_ASK_SCHEMA = Type.Object({
     questions: Type.Array(
@@ -83,18 +84,16 @@ const PHASES: Record<PlanState, PhaseConfig> = {
 
 const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
     brainstorming: "plan: brainstorming — restricted tools",
-    implementing: "plan: implementing — approved tools enabled",
+    implementing: "plan: implementing — accepted tools enabled",
 };
 
-/** Returns whether a tool stays active during brainstorming. */
-function isBrainstormingTool(tool: string): boolean {
-    return BRAINSTORMING_TOOLS.includes(tool) || tool.startsWith(BRAINSTORMING_MCP_PREFIX);
-}
-
-/** Returns a reason to block a tool call during brainstorming, or undefined to allow it. */
-function brainstormingBlockReason(toolName: string): string | undefined {
-    if (CONTROL_TOOLS.has(toolName) || isBrainstormingTool(toolName)) return undefined;
-    return `Plan mode: the "${toolName}" tool is not available during brainstorming.`;
+/** Returns whether the configured allowlist names a tool, matching exact names and `*` suffixes. */
+function matchesAllowedTool(toolName: string, entries: string[]): boolean {
+    return entries.some((entry) => {
+        if (!entry.endsWith("*")) return toolName === entry;
+        const prefix = entry.slice(0, -1);
+        return prefix.length > 0 && toolName.startsWith(prefix);
+    });
 }
 
 /** Builds a successful tool result with one text block. */
@@ -102,50 +101,41 @@ function textResult(text: string): PlanToolResult {
     return { content: [{ type: "text", text }], details: {} };
 }
 
-/** Renders a bullet list, or omits the section entirely when the list is empty. */
-export function bulletSection(heading: string, items?: string[]): string {
-    if (!items || items.length === 0) return "";
-    return `\n\n## ${heading}\n${items.map((item) => `- ${item}`).join("\n")}`;
-}
-
-/** Rejects placeholder text that cannot support an informed approval. */
+/** Rejects placeholder text that cannot support an informed decision. */
 export function requireCompleteProposal(proposal: PlanProposal): void {
-    const fields = [proposal.title, proposal.problem, proposal.outcome, proposal.approach];
-    if (fields.some((value) => value.trim().length < 3)) {
-        throw new Error("The proposal contains empty or overly short required text.");
+    if (proposal.description.trim().length < 3) {
+        throw new Error("The proposal description is empty or overly short.");
     }
     if (proposal.changes.some((item) => item.path.trim().length < 2 || item.change.trim().length < 3)) {
         throw new Error("Every change must include a meaningful path and description.");
     }
-    if (proposal.changes.some((item) => item.path.startsWith("/") || item.path.includes(".."))) {
-        throw new Error("Change paths must be relative and must not traverse parent directories.");
-    }
-    const criteria = proposal.acceptanceCriteria.map((item) => item.trim().toLowerCase());
-    if (criteria.some((item) => item.length < 3) || new Set(criteria).size !== criteria.length) {
-        throw new Error("Acceptance criteria must be meaningful and unique.");
+    const tests = proposal.tests ?? [];
+    if (tests.some((item) => item.path.trim().length < 2 || item.test.trim().length < 3)) {
+        throw new Error("Every test must include a meaningful path and behavior.");
     }
     const texts = [
-        ...fields,
-        ...proposal.changes.map((item) => item.path),
-        ...proposal.changes.map((item) => item.change),
-        ...proposal.acceptanceCriteria,
+        proposal.description,
+        ...proposal.changes.flatMap((item) => [item.path, item.change, ...(item.example ? [item.example] : [])]),
+        ...tests.flatMap((item) => [item.path, item.test, ...(item.example ? [item.example] : [])]),
     ];
     if (texts.some((value) => PLACEHOLDER_VALUE.test(value.trim()))) {
         throw new Error("The proposal contains placeholder content. Resolve it before proposing.");
     }
 }
 
-/** Formats the canonical engineering proposal for review and implementation. */
+/** Renders one change or test entry as a titled block with an optional example. */
+function formatEntry(path: string, body: string, example?: string): string {
+    const renderedExample = example ? `\n\nExample:\n\n\`\`\`\n${example}\n\`\`\`` : "";
+    return `### \`${path}\`\n${body}${renderedExample}`;
+}
+
+/** Formats the proposal for review and implementation. */
 export function formatProposal(proposal: PlanProposal): string {
-    const changes = proposal.changes.map((item) => `- \`${item.path}\` — ${item.change}`).join("\n");
-    return (
-        `# ${proposal.title}` +
-        `\n\n## Problem\n${proposal.problem}` +
-        `\n\n## Outcome\n${proposal.outcome}` +
-        `\n\n## Approach\n${proposal.approach}` +
-        `\n\n## Changes\n${changes}` +
-        bulletSection("Acceptance Criteria", proposal.acceptanceCriteria)
-    );
+    const changes = proposal.changes.map((item) => formatEntry(item.path, item.change, item.example)).join("\n\n");
+    const tests = proposal.tests?.length
+        ? `\n\n## Tests\n\n${proposal.tests.map((item) => formatEntry(item.path, item.test, item.example)).join("\n\n")}`
+        : "";
+    return `## Description\n${proposal.description}\n\n## Changes\n\n${changes}${tests}`;
 }
 
 /** Creates the plan workflow controller. */
@@ -153,11 +143,12 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
     let data: PlanModeData = normalizePlanModeData(undefined, []);
     const promptFailures = new Set<PlanState>();
     const activeImplementationTools = new Set<string>();
+    let planAdded = new Set<string>();
     let hasNudgedForProposal = false;
 
     /** Persists the current plan state. */
     function persistState(): void {
-        deps.persist(data);
+        deps.persist(structuredClone(data));
     }
 
     /** Updates the plan status indicator. */
@@ -170,13 +161,20 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         ctx.ui.setStatus("plan", `plan: ${state}`);
     }
 
-    /** Returns the active tools for a plan phase. */
+    /** Returns the tools plan mode activates for a phase. */
     function toolsFor(phase: Exclude<PlanState, "off">): string[] {
         if (phase === "brainstorming") {
-            const mcpTools = data.savedTools.filter((tool) => tool.startsWith(BRAINSTORMING_MCP_PREFIX));
-            return [...new Set([...BRAINSTORMING_TOOLS, ...mcpTools, ...PHASES[phase].controls])];
+            const allowed = data.savedTools.filter((tool) => matchesAllowedTool(tool, deps.getAllowedTools()));
+            return [...new Set([...DISCOVERY_TOOLS, ...allowed, ...PHASES[phase].controls])];
         }
         return [...new Set([...data.savedTools, ...PHASES[phase].controls])];
+    }
+
+    /** Activates a phase's tools and records which of them plan mode added. */
+    function applyTools(phase: Exclude<PlanState, "off">): void {
+        const tools = toolsFor(phase);
+        planAdded = new Set(tools.filter((tool) => !data.savedTools.includes(tool)));
+        deps.setActiveTools(tools);
     }
 
     /** Changes phase and applies its tool permissions. */
@@ -191,7 +189,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
             data.savedTools = restoreTools();
             deps.setActiveTools(data.savedTools);
         } else {
-            deps.setActiveTools(toolsFor(next));
+            applyTools(next);
         }
         setPlanStatus(ctx);
         ctx.ui.notify(next === "off" ? "Plan mode disabled." : STATE_NOTIFY[next]);
@@ -213,10 +211,42 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         return deps.getActiveTools().filter((tool) => !CONTROL_TOOLS.has(tool));
     }
 
-    /** Returns the saved tools plus any tools that became active after plan mode started. */
+    /** Returns saved tools plus tools that entered the session after plan mode started. */
     function restoreTools(): string[] {
-        const late = baseTools().filter((tool) => !BRAINSTORMING_TOOLS.includes(tool));
+        const late = baseTools().filter((tool) => !planAdded.has(tool));
         return [...new Set([...data.savedTools, ...late])];
+    }
+
+    /** Returns a reason to block a tool call during brainstorming, or undefined to allow it. */
+    function brainstormingBlockReason(toolName: string): string | undefined {
+        if (
+            CONTROL_TOOLS.has(toolName) ||
+            DISCOVERY_TOOLS.includes(toolName) ||
+            matchesAllowedTool(toolName, deps.getAllowedTools())
+        ) {
+            return undefined;
+        }
+        return `Plan mode: the "${toolName}" tool is not available during brainstorming.`;
+    }
+
+    /** Returns whether two tool lists contain the same names. */
+    function sameTools(left: string[], right: string[]): boolean {
+        return left.length === right.length && left.every((tool) => right.includes(tool));
+    }
+
+    /** Adopts tools that connected after plan mode started and re-applies the phase's tool set. */
+    function syncTools(phase: Exclude<PlanState, "off">): void {
+        const late = baseTools().filter((tool) => !data.savedTools.includes(tool) && !planAdded.has(tool));
+        if (late.length > 0) {
+            data.savedTools = [...data.savedTools, ...late];
+            persistState();
+        }
+        if (!sameTools(toolsFor(phase), deps.getActiveTools())) applyTools(phase);
+    }
+
+    /** Removes plan control tools that registration activated while plan mode is off. */
+    function dropStrayControlTools(): void {
+        if (deps.getActiveTools().some((tool) => CONTROL_TOOLS.has(tool))) deps.setActiveTools(baseTools());
     }
 
     /** Asks a choice question and supports a custom answer. */
@@ -239,15 +269,15 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         if (!data.proposal) throw new Error("No stored proposal is available.");
         const markdown = formatProposal(data.proposal);
         if (!ctx.hasUI) {
-            return textResult(`Proposal stored. Approval requires a UI session.\n\n${markdown}`);
+            return textResult(`Proposal stored. Acceptance requires a UI session.\n\n${markdown}`);
         }
         deps.appendDisplay("plan-proposal", { markdown });
-        const choice = await ctx.ui.select("Review the proposal above", [REVIEW_APPROVE, REVIEW_REVISE, REVIEW_DEFER]);
-        if (choice === REVIEW_APPROVE) {
+        const choice = await ctx.ui.select("Review the proposal above", [REVIEW_ACCEPT, REVIEW_REJECT, REVIEW_DEFER]);
+        if (choice === REVIEW_ACCEPT) {
             transition(ctx, "implementing");
-            return textResult("Proposal approved. Begin implementation.");
+            return textResult("Proposal accepted. Begin implementation.");
         }
-        if (choice === REVIEW_REVISE) {
+        if (choice === REVIEW_REJECT) {
             data.proposal = undefined;
             data.waitingForUserFeedback = true;
             setPlanStatus(ctx);
@@ -256,7 +286,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
                 "Proposal rejected. Plan mode is waiting for your feedback. Describe the required changes before the agent asks questions or submits another proposal.",
             );
         }
-        return textResult("Proposal stored for later review.");
+        return textResult("Proposal kept for review. Run /plan review to open it again.");
     }
 
     const controller: PlanController = {
@@ -265,6 +295,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         start(ctx, initial) {
             promptFailures.clear();
             activeImplementationTools.clear();
+            planAdded = new Set();
             hasNudgedForProposal = false;
             if (!initial) {
                 data = normalizePlanModeData(undefined, baseTools());
@@ -273,13 +304,28 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
                 return;
             }
             data = initial;
-            if (data.phase !== "off") deps.setActiveTools(toolsFor(data.phase));
+            if (data.phase === "off") dropStrayControlTools();
+            else applyTools(data.phase);
+            setPlanStatus(ctx);
+        },
+        resume(ctx, next) {
+            const previous = data.phase;
+            const sessionTools = previous === "off" ? baseTools() : restoreTools();
+            activeImplementationTools.clear();
+            hasNudgedForProposal = false;
+            data = { ...next, savedTools: sessionTools };
+            if (data.phase === "off") {
+                planAdded = new Set();
+                if (previous !== "off") deps.setActiveTools(sessionTools);
+            } else {
+                applyTools(data.phase);
+            }
             setPlanStatus(ctx);
         },
         async propose(proposal, ctx) {
             requirePhase("brainstorming");
             if (data.waitingForUserFeedback) {
-                throw new Error("Wait for the user to provide revision feedback first.");
+                throw new Error("Wait for the user to provide feedback first.");
             }
             requireCompleteProposal(proposal);
             data.proposal = proposal;
@@ -289,7 +335,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         async ask(questions, ctx) {
             requirePhase("brainstorming");
             if (data.waitingForUserFeedback) {
-                throw new Error("Wait for the user to provide revision feedback first.");
+                throw new Error("Wait for the user to provide feedback first.");
             }
             if (!ctx.hasUI) {
                 return textResult("Clarifying questions require a UI session; none is available.");
@@ -348,7 +394,11 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
             }
         },
         beforeAgentStart(systemPrompt, ctx) {
-            if (data.phase === "off") return undefined;
+            if (data.phase === "off") {
+                dropStrayControlTools();
+                return undefined;
+            }
+            syncTools(data.phase);
             const base = deps.loadPrompt(data.phase);
             if (!base) {
                 if (!promptFailures.has(data.phase)) {
@@ -374,7 +424,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
             if (hasToolsInFlight() || hasNudgedForProposal) return;
             hasNudgedForProposal = true;
             deps.sendUserMessage(
-                "If every acceptance criterion is verified, call plan_complete now. If not, continue implementing.",
+                "If every change in the proposal is done and verified, call plan_complete now. If not, continue implementing.",
             );
         },
         onShutdown() {

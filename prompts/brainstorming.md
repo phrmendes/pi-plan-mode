@@ -1,8 +1,8 @@
 # Plan Mode
 
-Planning uses a restricted tool set: `read` (with `offset` and `limit`), `grep`, `ls`, `find`, and the agent-browser MCP tools (`mcp__agent_browser__*`). Shell and editing tools are inactive until the user approves a proposal.
+Planning uses a restricted tool set: `read` (with `offset` and `limit`), `grep`, `ls`, and `find`. The user may allow more tools for this session; use only the tools you can see. Shell and editing tools are inactive until the user accepts a proposal.
 
-Use `grep`, `ls`, and `find` to discover files, and `read` to inspect them. Use the agent-browser tools to research external documentation and pages. The agent-browser tools can act on pages, so do not submit forms or change external state.
+Use `grep`, `ls`, and `find` to discover files, and `read` to inspect them. Some tasks need external pages; use whatever read-only tools this session provides.
 
 Inspect the task. Do not change project files.
 
@@ -10,19 +10,17 @@ Before you submit a proposal:
 
 - Read the relevant files.
 - Understand the current behavior.
-- Ask only questions that can change the scope or design.
+- Ask only questions that can change the scope or design, using `plan_ask`.
 - Resolve important unknowns.
 
 When the information is sufficient, call `plan_propose` once. Submit one complete proposal. Do not describe a future proposal in the chat. Do not submit a partial proposal. Do not repeat the proposal in the chat.
 
-The proposal must include:
+The proposal contains:
 
-- The problem.
-- The expected result.
-- The approach.
-- The files or areas that will change.
-- Testable acceptance criteria.
+- `description`: one short paragraph describing what should change and why.
+- `changes`: one entry per file or area, each with a `path`, the specific `change`, and a small concrete `example` when it removes ambiguity.
+- `tests`: one entry per test worth adding or updating, each with a `path`, the `test` behavior, and an optional `example`. Add tests only when they make sense for this change. Test real behavior that could break; do not restate existing coverage, assert the implementation back to itself, or add tests that cannot fail. Omit `tests` when there is nothing meaningful to test.
 
-Keep the proposal concise: use one short paragraph per main section and one line per change and acceptance criterion.
+Keep the proposal concise: one short paragraph, and one line per change and per test.
 
-After the user rejects a proposal, wait for the user to describe the required changes. Do not ask questions or submit another proposal before the user sends this feedback.
+The user can accept the proposal, reject it, or ask for review. After a rejection, wait for the user to describe the required changes. Do not ask questions or submit another proposal before the user sends this feedback.

@@ -1,17 +1,20 @@
-import { getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
+import { loadPlanConfig, parseAllowedTools, planConfigPath } from "./config.ts";
 import { createPlanController, PLAN_ASK_SCHEMA, PLAN_TOOLS } from "./plan.ts";
-import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanState } from "./state.ts";
+import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanState } from "./state.ts";
 
 export interface PlanModeOptions {
     loadPrompt?: (phase: PlanState) => string | null;
+    allowedTools?: string[];
 }
 
 /** Registers the agent-driven plan workflow. */
 export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
     const promptCache = new Map<PlanState, string>();
+    let fileAllowedTools: string[] = [];
 
     pi.registerEntryRenderer("plan-proposal", (entry) => {
         const data = entry.data as { markdown?: unknown } | undefined;
@@ -39,6 +42,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     }
 
     const controller = createPlanController({
+        getAllowedTools: () => [...parseAllowedTools(options.allowedTools ?? []), ...fileAllowedTools],
         getActiveTools: () => pi.getActiveTools(),
         setActiveTools: (tools) => pi.setActiveTools(tools),
         persist: (data) => pi.appendEntry("plan-mode", data),
@@ -50,7 +54,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     pi.registerTool({
         name: PLAN_TOOLS.propose,
         label: "Propose Plan",
-        description: "Submit one complete proposal for user review and approval",
+        description: "Submit one complete proposal for user review and acceptance",
         parameters: PLAN_PROPOSAL_SCHEMA,
         async execute(_id, params, _signal, _update, ctx) {
             return controller.propose(params, ctx);
@@ -60,7 +64,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     pi.registerTool({
         name: PLAN_TOOLS.complete,
         label: "Complete Plan",
-        description: "Complete the approved proposal after implementation and checks",
+        description: "Complete the accepted proposal after implementation and checks",
         parameters: Type.Object({}),
         async execute(_id, _params, _signal, _update, ctx) {
             return controller.complete(ctx);
@@ -115,13 +119,25 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         controller.onShutdown();
     });
 
-    pi.on("session_start", (_event, ctx) => {
-        promptCache.clear();
+    /** Reads the plan-mode state saved on the active branch, if any. */
+    function readBranchState(ctx: ExtensionContext): PlanModeData | undefined {
         const entry = ctx.sessionManager
             .getBranch()
             .filter((candidate) => candidate.type === "custom" && candidate.customType === "plan-mode")
             .pop() as { data?: unknown } | undefined;
-        const data = entry ? normalizePlanModeData(entry.data, controller.baseTools()) : undefined;
-        controller.start(ctx, data);
+        return entry ? normalizePlanModeData(entry.data, controller.baseTools()) : undefined;
+    }
+
+    pi.on("session_start", (_event, ctx) => {
+        promptCache.clear();
+        const config = loadPlanConfig(planConfigPath());
+        fileAllowedTools = config.allowedTools;
+        for (const error of config.errors) ctx.ui.notify(error, "warning");
+        controller.start(ctx, readBranchState(ctx));
+    });
+
+    pi.on("session_tree", (_event, ctx) => {
+        const data = readBranchState(ctx);
+        if (data) controller.resume(ctx, data);
     });
 }

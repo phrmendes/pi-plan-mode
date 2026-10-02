@@ -10,23 +10,34 @@ import {
     type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import planMode from "./index.ts";
+import { Type } from "typebox";
+import planMode, { type PlanModeOptions } from "./index.ts";
 import type { PlanProposal } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
-    title: "Improve flow",
-    problem: "The flow is hard to follow",
-    outcome: "The proposal flow is clear",
-    approach: "Use one proposal tool for submission and approval.",
-    changes: [{ path: "src/index.ts", change: "Simplify orchestration and remove duplicate actions" }],
-    acceptanceCriteria: ["One tool submits the proposal", "Transition tests pass"],
+    description: "Simplify the proposal flow so one tool handles submission and acceptance.",
+    changes: [
+        {
+            path: "src/index.ts",
+            change: "Simplify orchestration and remove duplicate actions",
+            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+        },
+    ],
+    tests: [
+        {
+            path: "src/index.test.ts",
+            test: "Registers the plan control tools, command, and renderer",
+        },
+    ],
 };
 
 /** Builds a real pi agent session wired to a scripted (network-free) fake model. */
-async function createFakeModelSession(sessionManager: SessionManager) {
+async function createFakeModelSession(sessionManager: SessionManager, options: PlanModeOptions = {}) {
     const faux = fauxProvider();
+    let hostApi!: ExtensionAPI;
     const fauxProviderExtension = (pi: ExtensionAPI): void => {
+        hostApi = pi;
         pi.registerProvider(faux.provider);
     };
 
@@ -35,7 +46,7 @@ async function createFakeModelSession(sessionManager: SessionManager) {
     const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
         agentDir: mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-")),
-        extensionFactories: [(pi) => planMode(pi, {}), fauxProviderExtension],
+        extensionFactories: [(pi) => planMode(pi, options), fauxProviderExtension],
     });
     await resourceLoader.reload();
 
@@ -48,7 +59,7 @@ async function createFakeModelSession(sessionManager: SessionManager) {
     // are bound to a running mode (normally done by pi's interactive/print/RPC runners).
     await session.bindExtensions({ mode: "print" });
 
-    return { session, faux };
+    return { session, faux, pi: hostApi };
 }
 
 function lastPlanModeEntry(sessionManager: SessionManager): { phase?: string } | undefined {
@@ -59,7 +70,7 @@ function lastPlanModeEntry(sessionManager: SessionManager): { phase?: string } |
     return entries.at(-1)?.data as { phase?: string } | undefined;
 }
 
-test("brainstorming: a real agent turn calling plan_propose surfaces the formatted PRD", async () => {
+test("brainstorming: a real agent turn calling plan_propose surfaces the formatted proposal", async () => {
     const sessionManager = SessionManager.inMemory();
     const { session, faux } = await createFakeModelSession(sessionManager);
 
@@ -71,8 +82,11 @@ test("brainstorming: a real agent turn calling plan_propose surfaces the formatt
     await session.prompt("Refactor the plan-mode workflow.");
 
     const transcript = JSON.stringify(sessionManager.getEntries());
-    assert.match(transcript, /# Improve flow/);
-    assert.match(transcript, /Transition tests pass/);
+    assert.match(transcript, /## Description/);
+    assert.match(transcript, /Simplify the proposal flow/);
+    assert.match(transcript, /mcp__browser__/);
+    assert.match(transcript, /## Tests/);
+    assert.match(transcript, /Registers the plan control tools/);
 
     session.dispose();
 });
@@ -112,7 +126,7 @@ test(
             });
         });
 
-        await session.prompt("Implement the approved proposal.");
+        await session.prompt("Implement the accepted proposal.");
         await planModeDisabled;
 
         assert.ok(faux.state.callCount >= 2, "the reminder should have triggered a second model turn");
@@ -121,3 +135,72 @@ test(
         session.dispose();
     },
 );
+
+test("brainstorming: tools that connect after startup reach the model only when allowed", async () => {
+    const sessionManager = SessionManager.inMemory();
+    const { session, faux, pi } = await createFakeModelSession(sessionManager, {
+        allowedTools: ["mcp__demo__read_page"],
+    });
+    for (const name of ["mcp__demo__read_page", "mcp__demo__delete_all"]) {
+        pi.registerTool({
+            name,
+            label: name,
+            description: name,
+            parameters: Type.Object({}),
+            async execute() {
+                return { content: [{ type: "text" as const, text: "ok" }], details: {} };
+            },
+        });
+    }
+
+    let offered: string[] = [];
+    faux.setResponses([
+        () => {
+            offered = session.getActiveToolNames();
+            return fauxAssistantMessage("Inspected.", { stopReason: "stop" });
+        },
+    ]);
+    await session.prompt("Inspect the project.");
+
+    assert.deepEqual(offered.sort(), [
+        "find",
+        "grep",
+        "ls",
+        "mcp__demo__read_page",
+        "plan_ask",
+        "plan_propose",
+        "read",
+    ]);
+    session.dispose();
+});
+
+test("off: a resumed session does not expose the plan control tools", async () => {
+    const sessionManager = SessionManager.inMemory();
+    sessionManager.appendCustomEntry("plan-mode", { phase: "off", savedTools: FULL_TOOLS });
+    const { session } = await createFakeModelSession(sessionManager);
+    assert.deepEqual(
+        session.getActiveToolNames().filter((name) => name.startsWith("plan_")),
+        [],
+    );
+    session.dispose();
+});
+
+test("session tree: navigating to an earlier branch restores that branch's plan phase", async () => {
+    const sessionManager = SessionManager.inMemory();
+    const brainstormingEntry = sessionManager.appendCustomEntry("plan-mode", {
+        phase: "brainstorming",
+        savedTools: FULL_TOOLS,
+    });
+    sessionManager.appendCustomEntry("plan-mode", {
+        phase: "implementing",
+        proposal: PROPOSAL,
+        savedTools: FULL_TOOLS,
+    });
+    const { session } = await createFakeModelSession(sessionManager);
+    assert.ok(session.getActiveToolNames().includes("plan_complete"));
+
+    await session.navigateTree(brainstormingEntry, { summarize: false });
+
+    assert.deepEqual(session.getActiveToolNames().sort(), ["find", "grep", "ls", "plan_ask", "plan_propose", "read"]);
+    session.dispose();
+});

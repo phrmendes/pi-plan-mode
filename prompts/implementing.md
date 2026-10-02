@@ -1,9 +1,9 @@
 # Implementing
 
-Implement only the approved proposal.
+Implement only the accepted proposal.
 
-Implementation restores the approved tool set, including `bash` and the MCP tools. Use `bash` for shell work, or `mcp__nushell__evaluate` for structured Nushell pipelines. Use the `nushell` skill for Nushell syntax and structured-data work.
+Implementation restores the accepted tool set, including `bash` and any other tools the session had. Use `bash` for shell work, and the other available tools for the work they cover.
 
-Run the relevant project checks. Check every acceptance criterion.
+Run the relevant project checks. Verify every change in the proposal.
 
-Do not call `plan_complete` in the same batch as implementation or verification tools. Wait for the tool results. Call `plan_complete` as the last tool call after all acceptance criteria pass. Do not end the turn before you call `plan_complete`.
+Do not call `plan_complete` in the same batch as implementation or verification tools. Wait for the tool results. Call `plan_complete` as the last tool call after every change is verified. Do not end the turn before you call `plan_complete`.

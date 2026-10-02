@@ -3,13 +3,48 @@ import assert from "node:assert/strict";
 import { normalizePlanModeData, type PlanProposal } from "./state.ts";
 
 const PROPOSAL: PlanProposal = {
-    title: "Improve flow",
-    problem: "The current proposal flow is hard to follow.",
-    outcome: "Agents submit one complete engineering proposal.",
-    approach: "Combine proposal submission and approval into one control tool.",
-    changes: [{ path: "src/index.ts", change: "Simplify proposal orchestration and remove duplicate steps" }],
-    acceptanceCriteria: ["One proposal call opens approval"],
+    description: "Agents should submit one short proposal that the user can accept.",
+    changes: [
+        {
+            path: "src/index.ts",
+            change: "Simplify proposal orchestration and remove duplicate steps",
+            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+        },
+    ],
 };
+
+test("keeps the optional tests in a proposal", () => {
+    const proposal = {
+        ...PROPOSAL,
+        tests: [
+            { path: "src/plan.test.ts", test: "Rejects a proposal without a description" },
+            { path: "src/state.test.ts", test: "Keeps optional tests", example: "  " },
+        ],
+    };
+    const data = normalizePlanModeData({ phase: "brainstorming", proposal, savedTools: ["read"] }, ["read"]);
+    assert.deepEqual(data.proposal?.tests, [
+        { path: "src/plan.test.ts", test: "Rejects a proposal without a description" },
+        { path: "src/state.test.ts", test: "Keeps optional tests" },
+    ]);
+});
+
+test("drops an empty or malformed tests field but keeps the proposal", () => {
+    const empty = normalizePlanModeData(
+        { phase: "brainstorming", proposal: { ...PROPOSAL, tests: [] }, savedTools: ["read"] },
+        ["read"],
+    );
+    assert.equal(empty.proposal?.tests, undefined);
+    const malformed = normalizePlanModeData(
+        {
+            phase: "brainstorming",
+            proposal: { ...PROPOSAL, tests: [{ path: "src/plan.test.ts" }] },
+            savedTools: ["read"],
+        },
+        ["read"],
+    );
+    assert.equal(malformed.proposal?.tests, undefined);
+    assert.ok(malformed.proposal);
+});
 
 test("normalizes current persisted state", () => {
     assert.deepEqual(
@@ -24,6 +59,18 @@ test("normalizes current persisted state", () => {
     );
 });
 
+test("drops an optional example that is not meaningful text", () => {
+    const data = normalizePlanModeData(
+        {
+            phase: "brainstorming",
+            proposal: { ...PROPOSAL, changes: [{ ...PROPOSAL.changes[0], example: "   " }] },
+            savedTools: ["read"],
+        },
+        ["read"],
+    );
+    assert.deepEqual(data.proposal?.changes, [{ path: "src/index.ts", change: PROPOSAL.changes[0].change }]);
+});
+
 test("removes malformed structured proposals", () => {
     const data = normalizePlanModeData(
         {
@@ -36,12 +83,20 @@ test("removes malformed structured proposals", () => {
     assert.equal(data.proposal, undefined);
 });
 
-test("removes proposals missing required brief PRD sections", () => {
-    const { approach: _approach, ...withoutApproach } = PROPOSAL;
-    const data = normalizePlanModeData({ phase: "brainstorming", proposal: withoutApproach, savedTools: ["read"] }, [
-        "read",
-    ]);
-    assert.equal(data.proposal, undefined);
+test("removes proposals without a description or changes", () => {
+    const { description: _description, ...withoutDescription } = PROPOSAL;
+    assert.equal(
+        normalizePlanModeData({ phase: "brainstorming", proposal: withoutDescription, savedTools: ["read"] }, ["read"])
+            .proposal,
+        undefined,
+    );
+    assert.equal(
+        normalizePlanModeData(
+            { phase: "brainstorming", proposal: { description: "Fine", changes: [] }, savedTools: ["read"] },
+            ["read"],
+        ).proposal,
+        undefined,
+    );
 });
 
 test("normalizes workflow invariants", () => {
@@ -65,7 +120,7 @@ test("falls back to active tools when saved tools are absent", () => {
     assert.deepEqual(data.savedTools, ["read", "edit"]);
 });
 
-test("keeps revision feedback only in brainstorming", () => {
+test("keeps rejection feedback only in brainstorming", () => {
     const brainstorming = normalizePlanModeData({ phase: "brainstorming", waitingForUserFeedback: true }, ["read"]);
     assert.equal(brainstorming.waitingForUserFeedback, true);
     const implementing = normalizePlanModeData(

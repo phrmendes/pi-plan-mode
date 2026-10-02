@@ -1,16 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import planMode from "./index.ts";
 import type { PlanModeData, PlanProposal } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
-    title: "Improve flow",
-    problem: "The flow is hard to follow",
-    outcome: "The proposal flow is clear",
-    approach: "Use one proposal tool for submission and approval.",
-    changes: [{ path: "src/index.ts", change: "Simplify orchestration and remove duplicate actions" }],
-    acceptanceCriteria: ["One tool submits the proposal", "Transition tests pass"],
+    description: "Simplify the proposal flow so one tool handles submission and acceptance.",
+    changes: [
+        {
+            path: "src/index.ts",
+            change: "Simplify orchestration and remove duplicate actions",
+            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+        },
+    ],
 };
 
 interface Entry {
@@ -37,6 +42,8 @@ interface HarnessOptions {
     entries?: Entry[];
     branch?: Entry[];
     tools?: string[];
+    allowedTools?: string[];
+    agentDir?: string;
     choices?: (string | undefined)[];
     loadPrompt?: (phase: string) => string | null;
     rejectStartupActions?: boolean;
@@ -53,6 +60,7 @@ function createHarness(options: HarnessOptions = {}) {
     const entryRenderers = new Map<string, unknown>();
     const appended: PlanModeData[] = [];
     const displayEntries: unknown[] = [];
+    const notes: string[] = [];
     let activeTools = options.tools ?? [...FULL_TOOLS];
     let status: string | undefined;
     let setActiveToolsCalls = 0;
@@ -82,7 +90,7 @@ function createHarness(options: HarnessOptions = {}) {
         hasUI: true,
         ui: {
             setStatus: (_key: string, value?: string) => void (status = value),
-            notify: () => {},
+            notify: (message: string) => void notes.push(message),
             select: async () => (options.choices ?? []).shift(),
             input: async () => undefined,
         },
@@ -96,15 +104,24 @@ function createHarness(options: HarnessOptions = {}) {
 
     planMode(pi as never, {
         loadPrompt: options.loadPrompt,
+        allowedTools: options.allowedTools,
     });
 
     return {
         appended,
         displayEntries,
+        notes,
         entryRenderers,
         start: () => {
             started = true;
-            return events.get("session_start")!({}, ctx);
+            const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+            process.env.PI_CODING_AGENT_DIR = options.agentDir ?? mkdtempSync(join(tmpdir(), "pi-plan-mode-agent-"));
+            try {
+                return events.get("session_start")!({}, ctx);
+            } finally {
+                if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+                else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+            }
         },
         tool: (name: string, input: unknown = {}, id = "id") =>
             tools.get(name)!.execute(id, input, undefined, undefined, ctx),
@@ -129,7 +146,7 @@ test("registers the plan control tools, command, and renderer", () => {
     for (const name of ["plan_propose", "plan_complete", "plan_ask"]) {
         assert.ok(h.toolDefinition(name), name);
     }
-    assert.equal(h.toolDefinition("nushell"), undefined);
+    assert.equal(h.toolDefinition("mcp__docs__search"), undefined);
     assert.ok(h.entryRenderers.has("plan-proposal"));
 });
 
@@ -166,19 +183,19 @@ test("restores state from the active branch", () => {
 });
 
 test("brainstorming blocks a disallowed tool through the tool_call event", () => {
-    const h = createHarness();
+    const h = createHarness({ tools: [...FULL_TOOLS, "mcp__docs__search"] });
     h.start();
-    const result = h.emit("tool_call", { toolName: "mcp__nushell__evaluate" }) as
+    const result = h.emit("tool_call", { toolName: "mcp__docs__search" }) as
         { block?: boolean; reason?: string } | undefined;
     assert.equal(result?.block, true);
     assert.match(result?.reason ?? "", /not available/i);
 });
 
-test("brainstorming allows read and agent-browser through the tool_call event", () => {
-    const h = createHarness();
+test("brainstorming allows read and a whitelisted active tool through the tool_call event", () => {
+    const h = createHarness({ tools: [...FULL_TOOLS, "mcp__browser__open"], allowedTools: ["mcp__browser__*"] });
     h.start();
     assert.equal(h.emit("tool_call", { toolName: "read" }), undefined);
-    assert.equal(h.emit("tool_call", { toolName: "mcp__agent_browser__open" }), undefined);
+    assert.equal(h.emit("tool_call", { toolName: "mcp__browser__open" }), undefined);
 });
 
 test("tool lifecycle events are wired to implementation tracking", async () => {
@@ -198,4 +215,71 @@ test("prompt composition is turn-local system text", () => {
     h.start();
     const result = h.beforeAgentStart();
     assert.match(result?.systemPrompt ?? "", /^base\n\n# Plan Mode/);
+});
+
+test("reads the allowed tools from ~/.pi/agent/plan.json", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-plan-mode-agent-"));
+    writeFileSync(join(agentDir, "plan.json"), JSON.stringify({ allowedTools: ["mcp__docs__*"] }));
+    const h = createHarness({
+        agentDir,
+        tools: [...FULL_TOOLS, "mcp__docs__search", "mcp__browser__open"],
+    });
+    h.start();
+    assert.ok(h.activeTools.includes("mcp__docs__search"));
+    assert.ok(!h.activeTools.includes("mcp__browser__open"));
+});
+
+test("merges the option and plan.json allowlists", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-plan-mode-agent-"));
+    writeFileSync(join(agentDir, "plan.json"), JSON.stringify({ allowedTools: ["mcp__docs__search"] }));
+    const h = createHarness({
+        agentDir,
+        allowedTools: ["mcp__browser__open"],
+        tools: [...FULL_TOOLS, "mcp__docs__search", "mcp__browser__open"],
+    });
+    h.start();
+    assert.ok(h.activeTools.includes("mcp__docs__search"));
+    assert.ok(h.activeTools.includes("mcp__browser__open"));
+});
+
+test("reports a malformed plan.json and keeps only the builtins", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-plan-mode-agent-"));
+    writeFileSync(join(agentDir, "plan.json"), "{ not json");
+    const h = createHarness({ agentDir, tools: [...FULL_TOOLS, "mcp__docs__search"] });
+    h.start();
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
+    assert.ok(h.notes.some((note) => /plan\.json/.test(note)));
+});
+
+test("session_tree re-derives the plan phase from the new active branch", () => {
+    const options: HarnessOptions = {
+        branch: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    };
+    const h = createHarness(options);
+    h.start();
+    assert.equal(h.status, "plan: implementing");
+    options.branch = [entry({ phase: "brainstorming", savedTools: FULL_TOOLS })];
+    h.emit("session_tree", {});
+    assert.equal(h.status, "plan: brainstorming");
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
+});
+
+test("session_tree keeps the current state when the branch has no plan-mode entry", () => {
+    const options: HarnessOptions = {
+        branch: [entry({ phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS })],
+    };
+    const h = createHarness(options);
+    h.start();
+    options.branch = [];
+    h.emit("session_tree", {});
+    assert.equal(h.status, "plan: implementing");
+});
+
+test("a restored off state removes stray plan control tools", () => {
+    const h = createHarness({
+        entries: [entry({ phase: "off", savedTools: FULL_TOOLS })],
+        tools: [...FULL_TOOLS, "plan_propose", "plan_complete", "plan_ask"],
+    });
+    h.start();
+    assert.deepEqual(h.activeTools, FULL_TOOLS);
 });
