@@ -1,12 +1,8 @@
 # Implementing
 
-The shell interface is the `nushell` tool. Write direct Nushell commands; do not wrap commands in `nu -c`.
-
-Use the `nushell` skill for Nushell syntax and structured-data work.
-
 Implement only the approved proposal.
 
-Implementation restores the approved tool set. You may use Nushell and external commands needed to complete the approved proposal. Keep work within the approved proposal.
+Implementation restores the approved tool set, including `bash` and the MCP tools. Use `bash` for shell work, or `mcp__nushell__evaluate` for structured Nushell pipelines. Use the `nushell` skill for Nushell syntax and structured-data work.
 
 Run the relevant project checks. Check every acceptance criterion.
 

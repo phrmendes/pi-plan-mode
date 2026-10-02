@@ -1,10 +1,17 @@
 import { Type, type Static } from "typebox";
 
-export const PLAN_STATES = ["off", "brainstorming", "implementing"] as const;
 export type PlanState = (typeof PLAN_STATES)[number];
 
-/** Creates a required text schema with a field description. */
-const meaningful = (description: string) => Type.String({ minLength: 1, description });
+export interface PlanModeData {
+    phase: PlanState;
+    proposal?: PlanProposal;
+    savedTools: string[];
+    waitingForUserFeedback?: boolean;
+}
+
+export type PlanProposal = Static<typeof PLAN_PROPOSAL_SCHEMA>;
+
+const PLAN_STATES = ["off", "brainstorming", "implementing"] as const;
 
 export const PLAN_PROPOSAL_SCHEMA = Type.Object({
     title: meaningful("A concise title for the proposed change"),
@@ -22,16 +29,13 @@ export const PLAN_PROPOSAL_SCHEMA = Type.Object({
         minItems: 1,
     }),
 });
-export type PlanProposal = Static<typeof PLAN_PROPOSAL_SCHEMA>;
-
-export interface PlanModeData {
-    phase: PlanState;
-    proposal?: PlanProposal;
-    savedTools: string[];
-    waitingForUserFeedback?: boolean;
-}
 
 const PLAN_STATE_SET = new Set<string>(PLAN_STATES);
+
+/** Creates a required text schema with a field description. */
+function meaningful(description: string) {
+    return Type.String({ minLength: 1, description });
+}
 
 /** Normalizes the persisted tool list. */
 function normalizeTools(value: unknown, fallback: string[]): string[] {

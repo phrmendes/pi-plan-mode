@@ -1,14 +1,12 @@
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
-import { createNushellTool, type NushellToolOptions } from "./nushell.ts";
-import { createPlanController, PLAN_ASK_SCHEMA } from "./plan.ts";
+import { createPlanController, PLAN_ASK_SCHEMA, PLAN_TOOLS } from "./plan.ts";
 import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanState } from "./state.ts";
 
 export interface PlanModeOptions {
     loadPrompt?: (phase: PlanState) => string | null;
-    nushell?: Omit<NushellToolOptions, "isRestricted" | "cwd">;
 }
 
 /** Registers the agent-driven plan workflow. */
@@ -16,35 +14,26 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     const promptCache = new Map<PlanState, string>();
 
     pi.registerEntryRenderer("plan-proposal", (entry) => {
-        const proposal = entry.data as { markdown: string };
-        return new Markdown(proposal.markdown, 0, 0, getMarkdownTheme());
+        const data = entry.data as { markdown?: unknown } | undefined;
+        const markdown = typeof data?.markdown === "string" ? data.markdown : "";
+        return new Markdown(markdown, 0, 0, getMarkdownTheme());
     });
 
-    /** Reads one bundled phase prompt from disk. */
-    function readBundledPrompt(phase: PlanState): string | null {
+    /** Reads one bundled prompt file, or returns null when it is missing. */
+    function readPromptFile(name: string): string | null {
         try {
-            return readFileSync(new URL(`../prompts/${phase}.md`, import.meta.url), "utf8");
-        } catch {
-            return null;
+            return readFileSync(new URL(`../prompts/${name}`, import.meta.url), "utf8");
+        } catch (error) {
+            if ((error as { code?: string }).code === "ENOENT") return null;
+            throw error;
         }
     }
-
-    /** Reads the bundled instructions that apply to every agent turn. */
-    function readAgentInstructions(): string | null {
-        try {
-            return readFileSync(new URL("../prompts/instructions.md", import.meta.url), "utf8");
-        } catch {
-            return null;
-        }
-    }
-
-    const agentInstructions = readAgentInstructions();
 
     /** Loads and caches the prompt contract for a phase. */
     function loadPhasePrompt(phase: PlanState): string | null {
         const cached = promptCache.get(phase);
         if (cached) return cached;
-        const content = (options.loadPrompt ?? readBundledPrompt)(phase);
+        const content = (options.loadPrompt ?? ((value: PlanState) => readPromptFile(`${value}.md`)))(phase);
         if (content) promptCache.set(phase, content);
         return content;
     }
@@ -58,17 +47,8 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         loadPrompt: loadPhasePrompt,
     });
 
-    pi.registerTool(
-        createNushellTool({
-            cwd: process.cwd(),
-            shellPath: options.nushell?.shellPath ?? process.env.PI_NUSHELL_PATH ?? "nu",
-            operations: options.nushell?.operations,
-            isRestricted: () => controller.isRestricted(),
-        }),
-    );
-
     pi.registerTool({
-        name: "plan_propose",
+        name: PLAN_TOOLS.propose,
         label: "Propose Plan",
         description: "Submit one complete proposal for user review and approval",
         parameters: PLAN_PROPOSAL_SCHEMA,
@@ -78,7 +58,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     });
 
     pi.registerTool({
-        name: "plan_complete",
+        name: PLAN_TOOLS.complete,
         label: "Complete Plan",
         description: "Complete the approved proposal after implementation and checks",
         parameters: Type.Object({}),
@@ -88,7 +68,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     });
 
     pi.registerTool({
-        name: "plan_ask",
+        name: PLAN_TOOLS.ask,
         label: "Ask Clarifying Questions",
         description: "Ask the user one or more choice questions before you submit a proposal",
         parameters: PLAN_ASK_SCHEMA,
@@ -106,9 +86,13 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     });
 
     pi.on("input", (event, ctx) => {
-        const source = (event as { source?: string }).source;
-        controller.handleInput(source, ctx as ExtensionContext);
+        controller.handleInput(event.source, ctx);
         return { action: "continue" as const };
+    });
+
+    pi.on("tool_call", (event) => {
+        const reason = controller.blockReason(event.toolName);
+        return reason ? { block: true, reason } : undefined;
     });
 
     pi.on("tool_execution_start", (event) => {
@@ -124,10 +108,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
     });
 
     pi.on("before_agent_start", (event, ctx) => {
-        const planPrompt = controller.beforeAgentStart(event.systemPrompt, ctx);
-        const systemPrompt = planPrompt?.systemPrompt ?? event.systemPrompt;
-        if (!agentInstructions) return planPrompt;
-        return { systemPrompt: `${systemPrompt}\n\n${agentInstructions}` };
+        return controller.beforeAgentStart(event.systemPrompt, ctx);
     });
 
     pi.on("session_shutdown", () => {

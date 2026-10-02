@@ -12,7 +12,7 @@ stateDiagram-v2
     [*] --> brainstorming : new session or /plan
     brainstorming --> brainstorming : revise or defer proposal
     brainstorming --> implementing : approve plan_propose
-    implementing --> brainstorming : plan_complete
+    implementing --> off : plan_complete
 ```
 
 ## Workflow
@@ -21,7 +21,7 @@ The agent uses three control tools:
 
 - `plan_ask` — ask choice questions before proposing.
 - `plan_propose` — submit one complete proposal for review.
-- `plan_complete` — finish approved implementation after checks pass.
+- `plan_complete` — finish approved implementation, then disable plan mode.
 
 A proposal contains:
 
@@ -45,14 +45,13 @@ In a UI session, the user can approve, request revision, or keep the proposal fo
 
 During brainstorming, the agent can use:
 
-- `read`
-- the read-only `nushell` tool
+- `read` (full or partial reads)
+- `grep`, `ls`, and `find` (read-only search)
+- the agent-browser MCP tools (`mcp__agent_browser__*`)
 - `plan_ask`
 - `plan_propose`
 
-Editing tools and Bash are not active before approval. After approval, the saved implementation tools are restored together with `nushell` and `plan_complete`.
-
-The Nushell policy is a workflow guard, not a security sandbox. Use a VM for security. Each Nushell call runs in a separate process, so use explicit paths instead of relying on `cd` from an earlier call.
+Shell and editing tools are not active before approval. After approval, the saved tools are restored together with `plan_complete`. `plan_complete` disables plan mode.
 
 ## Install
 

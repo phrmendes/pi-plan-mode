@@ -2,52 +2,17 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { normalizePlanModeData, type PlanModeData, type PlanProposal, type PlanState } from "./state.ts";
 
-export const CONTROL_TOOLS = new Set(["nushell", "plan_propose", "plan_complete", "plan_ask"]);
-const BRAINSTORMING_TOOLS = new Set(["read"]);
-const NON_PLAN_SHELL_TOOLS = new Set(["bash"]);
-const ASK_OTHER_OPTION = "Other (type your own)";
-
-export const PLAN_ASK_SCHEMA = Type.Object({
-    questions: Type.Array(
-        Type.Object({
-            question: Type.String({ minLength: 1 }),
-            options: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-        }),
-        { minItems: 1 },
-    ),
-});
-
 interface PhaseConfig {
     controls: string[];
     commands: Array<{ value: string; label: string }>;
 }
 
-const PHASES: Record<PlanState, PhaseConfig> = {
-    off: { controls: [], commands: [] },
-    brainstorming: {
-        controls: ["plan_propose", "plan_ask"],
-        commands: [
-            { value: "review", label: "review — review the stored proposal" },
-            { value: "disable", label: "disable — exit plan mode" },
-        ],
-    },
-    implementing: {
-        controls: ["plan_complete"],
-        commands: [{ value: "disable", label: "disable — exit plan mode" }],
-    },
-};
-
-const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
-    brainstorming: "plan: brainstorming — read-only, exploring",
-    implementing: "plan: implementing — approved tools enabled",
-};
-
-export interface PlanToolResult {
+interface PlanToolResult {
     content: Array<{ type: "text"; text: string }>;
     details: Record<string, unknown>;
 }
 
-export interface PlanControllerDeps {
+interface PlanControllerDeps {
     getActiveTools(): string[];
     setActiveTools(tools: string[]): void;
     persist(data: PlanModeData): void;
@@ -56,11 +21,9 @@ export interface PlanControllerDeps {
     loadPrompt(phase: PlanState): string | null;
 }
 
-export interface PlanController {
-    readonly phase: PlanState;
+interface PlanController {
     baseTools(): string[];
-    isRestricted(): boolean;
-    toolsFor(phase: Exclude<PlanState, "off">): string[];
+    blockReason(toolName: string): string | undefined;
     start(ctx: ExtensionContext, data?: PlanModeData): void;
     propose(proposal: PlanProposal, ctx: ExtensionContext): Promise<PlanToolResult>;
     ask(
@@ -76,6 +39,67 @@ export interface PlanController {
     onToolExecutionEnd(toolCallId: string): void;
     onAgentSettled(): void;
     onShutdown(): void;
+}
+
+export const PLAN_TOOLS = {
+    propose: "plan_propose",
+    complete: "plan_complete",
+    ask: "plan_ask",
+} as const;
+
+const CONTROL_TOOLS = new Set<string>(Object.values(PLAN_TOOLS));
+const BRAINSTORMING_TOOLS = ["read", "grep", "ls", "find"];
+const BRAINSTORMING_MCP_PREFIX = "mcp__agent_browser__";
+const PLACEHOLDER_VALUE = /^(?:tbd|todo|n\/a|na|none|unknown|as needed|etc\.?)$/i;
+const ASK_OTHER_OPTION = "Other (type your own)";
+const REVIEW_APPROVE = "Approve and implement";
+const REVIEW_REVISE = "Request revision";
+const REVIEW_DEFER = "Keep for later";
+
+export const PLAN_ASK_SCHEMA = Type.Object({
+    questions: Type.Array(
+        Type.Object({
+            question: Type.String({ minLength: 1 }),
+            options: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+        }),
+        { minItems: 1 },
+    ),
+});
+
+const PHASES: Record<PlanState, PhaseConfig> = {
+    off: { controls: [], commands: [] },
+    brainstorming: {
+        controls: [PLAN_TOOLS.propose, PLAN_TOOLS.ask],
+        commands: [
+            { value: "review", label: "review — review the stored proposal" },
+            { value: "disable", label: "disable — exit plan mode" },
+        ],
+    },
+    implementing: {
+        controls: [PLAN_TOOLS.complete],
+        commands: [{ value: "disable", label: "disable — exit plan mode" }],
+    },
+};
+
+const STATE_NOTIFY: Record<Exclude<PlanState, "off">, string> = {
+    brainstorming: "plan: brainstorming — restricted tools",
+    implementing: "plan: implementing — approved tools enabled",
+};
+
+/** Returns whether a tool stays active during brainstorming. */
+function isBrainstormingTool(tool: string): boolean {
+    return BRAINSTORMING_TOOLS.includes(tool) || tool.startsWith(BRAINSTORMING_MCP_PREFIX);
+}
+
+/** Returns a reason to block a tool call during brainstorming, or undefined to allow it. */
+function brainstormingBlockReason(toolName: string): string | undefined {
+    if (CONTROL_TOOLS.has(toolName) || isBrainstormingTool(toolName)) return undefined;
+    return `Plan mode: the "${toolName}" tool is not available during brainstorming.`;
+}
+
+/** Builds a successful tool result with one text block. */
+function textResult(text: string): PlanToolResult {
+    return { content: [{ type: "text", text }], details: {} };
 }
 
 /** Renders a bullet list, or omits the section entirely when the list is empty. */
@@ -100,8 +124,13 @@ export function requireCompleteProposal(proposal: PlanProposal): void {
     if (criteria.some((item) => item.length < 3) || new Set(criteria).size !== criteria.length) {
         throw new Error("Acceptance criteria must be meaningful and unique.");
     }
-    const content = JSON.stringify(proposal);
-    if (/\b(?:tbd|todo|etc\.?|as needed|unknown)\b/i.test(content)) {
+    const texts = [
+        ...fields,
+        ...proposal.changes.map((item) => item.path),
+        ...proposal.changes.map((item) => item.change),
+        ...proposal.acceptanceCriteria,
+    ];
+    if (texts.some((value) => PLACEHOLDER_VALUE.test(value.trim()))) {
         throw new Error("The proposal contains placeholder content. Resolve it before proposing.");
     }
 }
@@ -144,21 +173,10 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
     /** Returns the active tools for a plan phase. */
     function toolsFor(phase: Exclude<PlanState, "off">): string[] {
         if (phase === "brainstorming") {
-            return [
-                ...new Set([
-                    ...data.savedTools.filter((tool) => BRAINSTORMING_TOOLS.has(tool)),
-                    "nushell",
-                    ...PHASES[phase].controls,
-                ]),
-            ];
+            const mcpTools = data.savedTools.filter((tool) => tool.startsWith(BRAINSTORMING_MCP_PREFIX));
+            return [...new Set([...BRAINSTORMING_TOOLS, ...mcpTools, ...PHASES[phase].controls])];
         }
-        return [
-            ...new Set([
-                ...data.savedTools.filter((tool) => !NON_PLAN_SHELL_TOOLS.has(tool)),
-                "nushell",
-                ...PHASES[phase].controls,
-            ]),
-        ];
+        return [...new Set([...data.savedTools, ...PHASES[phase].controls])];
     }
 
     /** Changes phase and applies its tool permissions. */
@@ -170,6 +188,7 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         if (next !== "brainstorming") data.waitingForUserFeedback = undefined;
         if (next === "off") {
             data.proposal = undefined;
+            data.savedTools = restoreTools();
             deps.setActiveTools(data.savedTools);
         } else {
             deps.setActiveTools(toolsFor(next));
@@ -194,6 +213,12 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         return deps.getActiveTools().filter((tool) => !CONTROL_TOOLS.has(tool));
     }
 
+    /** Returns the saved tools plus any tools that became active after plan mode started. */
+    function restoreTools(): string[] {
+        const late = baseTools().filter((tool) => !BRAINSTORMING_TOOLS.includes(tool));
+        return [...new Set([...data.savedTools, ...late])];
+    }
+
     /** Asks a choice question and supports a custom answer. */
     async function askQuestion(
         ctx: ExtensionContext,
@@ -214,57 +239,29 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         if (!data.proposal) throw new Error("No stored proposal is available.");
         const markdown = formatProposal(data.proposal);
         if (!ctx.hasUI) {
-            return {
-                content: [
-                    {
-                        type: "text" as const,
-                        text: `Proposal stored. Approval requires a UI session.\n\n${markdown}`,
-                    },
-                ],
-                details: {},
-            };
+            return textResult(`Proposal stored. Approval requires a UI session.\n\n${markdown}`);
         }
         deps.appendDisplay("plan-proposal", { markdown });
-        const choice = await ctx.ui.select("Review the proposal above", [
-            "Approve and implement",
-            "Request revision",
-            "Keep for later",
-        ]);
-        if (choice === "Approve and implement") {
+        const choice = await ctx.ui.select("Review the proposal above", [REVIEW_APPROVE, REVIEW_REVISE, REVIEW_DEFER]);
+        if (choice === REVIEW_APPROVE) {
             transition(ctx, "implementing");
-            return {
-                content: [{ type: "text" as const, text: "Proposal approved. Begin implementation." }],
-                details: {},
-            };
+            return textResult("Proposal approved. Begin implementation.");
         }
-        if (choice === "Request revision") {
+        if (choice === REVIEW_REVISE) {
             data.proposal = undefined;
             data.waitingForUserFeedback = true;
             setPlanStatus(ctx);
             persistState();
-            return {
-                content: [
-                    {
-                        type: "text" as const,
-                        text: "Proposal rejected. Plan mode is waiting for your feedback. Describe the required changes before the agent asks questions or submits another proposal.",
-                    },
-                ],
-                details: {},
-            };
+            return textResult(
+                "Proposal rejected. Plan mode is waiting for your feedback. Describe the required changes before the agent asks questions or submits another proposal.",
+            );
         }
-        return {
-            content: [{ type: "text" as const, text: "Proposal stored for later review." }],
-            details: {},
-        };
+        return textResult("Proposal stored for later review.");
     }
 
     const controller: PlanController = {
-        get phase() {
-            return data.phase;
-        },
         baseTools,
-        isRestricted: () => data.phase === "brainstorming",
-        toolsFor,
+        blockReason: (toolName) => (data.phase === "brainstorming" ? brainstormingBlockReason(toolName) : undefined),
         start(ctx, initial) {
             promptFailures.clear();
             activeImplementationTools.clear();
@@ -295,32 +292,20 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
                 throw new Error("Wait for the user to provide revision feedback first.");
             }
             if (!ctx.hasUI) {
-                return {
-                    content: [
-                        {
-                            type: "text" as const,
-                            text: "Clarifying questions require a UI session; none is available.",
-                        },
-                    ],
-                    details: {},
-                };
+                return textResult("Clarifying questions require a UI session; none is available.");
             }
             const answers: Array<{ question: string; answer: string }> = [];
             for (const item of questions.questions) answers.push(await askQuestion(ctx, item.question, item.options));
             const text = answers.map((entry) => `Q: ${entry.question}\nA: ${entry.answer}`).join("\n\n");
-            return { content: [{ type: "text" as const, text }], details: {} };
+            return textResult(text);
         },
         async complete(ctx) {
             requirePhase("implementing");
             if (hasToolsInFlight()) {
                 throw new Error("plan_complete must run after all implementation tools finish.");
             }
-            data.proposal = undefined;
-            transition(ctx, "brainstorming");
-            return {
-                content: [{ type: "text" as const, text: "Implementation complete. Brainstorming restored." }],
-                details: {},
-            };
+            transition(ctx, "off");
+            return textResult("Implementation complete. Plan mode disabled.");
         },
         async command(args, ctx) {
             const command = args?.trim();
@@ -394,7 +379,10 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         },
         onShutdown() {
             activeImplementationTools.clear();
-            if (data.phase !== "off") deps.setActiveTools(data.savedTools);
+            if (data.phase !== "off") {
+                data.savedTools = restoreTools();
+                deps.setActiveTools(data.savedTools);
+            }
         },
     };
 

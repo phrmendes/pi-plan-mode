@@ -1,10 +1,8 @@
 # Plan Mode
 
-The shell interface is the `nushell` tool. Write direct Nushell commands; do not wrap commands in `nu -c`.
+Planning uses a restricted tool set: `read` (with `offset` and `limit`), `grep`, `ls`, `find`, and the agent-browser MCP tools (`mcp__agent_browser__*`). Shell and editing tools are inactive until the user approves a proposal.
 
-Use the `nushell` skill before writing non-trivial Nushell commands. Use `|` pipelines normally. Prefer Nushell built-ins for structured data and repository inspection. Invoke approved external programs through Nushell only when Nushell does not provide the operation.
-
-Planning permits only simple, top-level, read-only Nushell pipelines. Do not use closures, lists, records, parenthesized command expressions, interpolation, aliases, definitions, imports, overlays, redirects, or nested execution. You may use read-only `git`, `gcloud`, `kubectl`, `uv`, `npm`, and `pnpm` commands. Do not create, modify, move, delete, install, deploy, publish, or redirect output to files.
+Use `grep`, `ls`, and `find` to discover files, and `read` to inspect them. Use the agent-browser tools to research external documentation and pages. The agent-browser tools can act on pages, so do not submit forms or change external state.
 
 Inspect the task. Do not change project files.
 
