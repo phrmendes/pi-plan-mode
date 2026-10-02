@@ -15,17 +15,15 @@
     "files": [
         "src",
         "prompts",
-        "skills",
         "!src/*.test.ts"
     ],
     "type": "module",
     "scripts": {
-        "test": "node --test src/index.test.ts src/plan.test.ts src/state.test.ts src/nushell.test.ts",
+        "test": "node --test src/index.test.ts src/plan.test.ts src/state.test.ts",
         "test:e2e": "node --test src/e2e.test.ts",
         "typecheck": "tsc -p tsconfig.json",
         "format": "prettier --write src/",
         "format:check": "prettier --check src/",
-        "lint": "tsc -p tsconfig.json",
         "pack:check": "rm -rf /tmp/pi-plan-mode-pack && mkdir -p /tmp/pi-plan-mode-pack && pnpm pack --pack-destination /tmp/pi-plan-mode-pack && tar -tf /tmp/pi-plan-mode-pack/*.tgz"
     },
     "peerDependencies": {
@@ -48,9 +46,6 @@
     "pi": {
         "extensions": [
             "./src/index.ts"
-        ],
-        "skills": [
-            "./skills"
         ]
     }
 }
