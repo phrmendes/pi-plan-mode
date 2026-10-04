@@ -92,7 +92,7 @@ test("brainstorming: a real agent turn calling plan_propose surfaces the formatt
 });
 
 test(
-    "implementing: the agent_settled reminder brings a silently-idle agent back to call plan_complete",
+    "implementing: the agent_settled reminder completes the implementation cycle into brainstorming",
     { timeout: 5000 },
     async () => {
         const sessionManager = SessionManager.inMemory();
@@ -103,34 +103,38 @@ test(
         });
         const { session, faux } = await createFakeModelSession(sessionManager);
 
-        // First turn: the model finishes without calling plan_complete (the bug we are guarding against).
-        // Second turn: triggered automatically by the extension's agent_settled reminder.
         faux.setResponses([
             fauxAssistantMessage("The change is done and verified.", { stopReason: "stop" }),
             fauxAssistantMessage([fauxToolCall("plan_complete", {})], { stopReason: "toolUse" }),
             fauxAssistantMessage("Acknowledged.", { stopReason: "stop" }),
         ]);
 
-        // The reminder fires asynchronously after the first turn settles, so wait for its effect
-        // (plan_complete reverting the phase) rather than for a specific count of framework events.
-        const planModeDisabled = new Promise<void>((resolve) => {
-            if (lastPlanModeEntry(sessionManager)?.phase === "off") {
+        const returnedToBrainstorming = new Promise<void>((resolve) => {
+            if (lastPlanModeEntry(sessionManager)?.phase === "brainstorming") {
                 resolve();
                 return;
             }
             const unsubscribe = session.subscribe((event) => {
                 if (event.type !== "entry_appended") return;
-                if (lastPlanModeEntry(sessionManager)?.phase !== "off") return;
+                if (lastPlanModeEntry(sessionManager)?.phase !== "brainstorming") return;
                 unsubscribe();
                 resolve();
             });
         });
 
         await session.prompt("Implement the accepted proposal.");
-        await planModeDisabled;
+        await returnedToBrainstorming;
 
         assert.ok(faux.state.callCount >= 2, "the reminder should have triggered a second model turn");
-        assert.equal(lastPlanModeEntry(sessionManager)?.phase, "off");
+        assert.equal(lastPlanModeEntry(sessionManager)?.phase, "brainstorming");
+        assert.deepEqual(session.getActiveToolNames().sort(), [
+            "find",
+            "grep",
+            "ls",
+            "plan_ask",
+            "plan_propose",
+            "read",
+        ]);
 
         session.dispose();
     },

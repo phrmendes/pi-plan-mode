@@ -207,7 +207,8 @@ test("tool lifecycle events are wired to implementation tracking", async () => {
     await assert.rejects(h.tool("plan_complete"), /after all implementation tools finish/i);
     h.emit("tool_execution_end", { toolCallId: "edit-1", toolName: "edit" });
     await h.tool("plan_complete");
-    assert.equal(h.status, undefined);
+    assert.equal(h.status, "plan: brainstorming");
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
 });
 
 test("prompt composition is turn-local system text", () => {

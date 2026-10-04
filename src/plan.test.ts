@@ -215,15 +215,16 @@ test("asking for review keeps the proposal for plan review", async () => {
     assert.equal(h.status, "plan: implementing");
 });
 
-test("plan_complete disables plan mode and clears the proposal", async () => {
+test("plan_complete returns to brainstorming and clears the proposal", async () => {
     const h = startHarness({
         data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
     });
     const result = await h.controller.complete(h.ctx);
-    assert.match(result.content[0].text, /disabled/);
-    assert.equal(h.status, undefined);
+    assert.match(result.content[0].text, /brainstorming/i);
+    assert.equal(h.status, "plan: brainstorming");
+    assert.equal(h.persisted.at(-1)?.phase, "brainstorming");
     assert.equal(h.persisted.at(-1)?.proposal, undefined);
-    assert.deepEqual(h.activeTools, FULL_TOOLS);
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
 });
 
 test("plan_complete waits for implementation tools to finish", async () => {
@@ -234,7 +235,7 @@ test("plan_complete waits for implementation tools to finish", async () => {
     await assert.rejects(h.controller.complete(h.ctx), /after all implementation tools finish/i);
     h.controller.onToolExecutionEnd("edit-1");
     await h.controller.complete(h.ctx);
-    assert.equal(h.status, undefined);
+    assert.equal(h.status, "plan: brainstorming");
 });
 
 test("agent_settled reminds once when idle mid-implementation", async () => {
@@ -401,7 +402,7 @@ test("leaving plan mode drops the tools plan mode added and keeps later ones", a
     assert.deepEqual(h.activeTools, [...ALL_TOOLS, "mcp__late__tool"]);
 });
 
-test("accepting and completing restores the saved tools without the whitelisted tool", async () => {
+test("completing returns to brainstorming with only whitelisted tools", async () => {
     const h = startHarness({
         tools: ALL_TOOLS,
         allowedTools: ["mcp__browser__*"],
@@ -411,7 +412,16 @@ test("accepting and completing restores the saved tools without the whitelisted 
     await h.controller.propose(PROPOSAL, h.ctx);
     assert.deepEqual(h.activeTools, [...ALL_TOOLS, "plan_complete"]);
     await h.controller.complete(h.ctx);
-    assert.deepEqual(h.activeTools, ALL_TOOLS);
+    assert.deepEqual(h.activeTools, [
+        "read",
+        "grep",
+        "ls",
+        "find",
+        "mcp__browser__open",
+        "mcp__browser__click",
+        "plan_propose",
+        "plan_ask",
+    ]);
 });
 
 test("a tool that connects after startup is adopted, and only allowed ones stay active", async () => {
@@ -440,13 +450,13 @@ test("syncing tools does nothing when the active set is already correct", () => 
     assert.equal(h.setActiveToolsCalls, calls);
 });
 
-test("a tool that connects during implementation stays active and is restored", async () => {
+test("a tool that connects during implementation is restricted after completion", async () => {
     const h = startHarness({ data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS } });
     h.setActiveTools([...h.activeTools, "mcp__docs__search"]);
     h.controller.beforeAgentStart("base", h.ctx);
     assert.ok(h.activeTools.includes("mcp__docs__search"));
     await h.controller.complete(h.ctx);
-    assert.deepEqual(h.activeTools, [...FULL_TOOLS, "mcp__docs__search"]);
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
 });
 
 test("plan control tools are removed while plan mode is off", () => {

@@ -350,8 +350,9 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
             if (hasToolsInFlight()) {
                 throw new Error("plan_complete must run after all implementation tools finish.");
             }
-            transition(ctx, "off");
-            return textResult("Implementation complete. Plan mode disabled.");
+            data.proposal = undefined;
+            transition(ctx, "brainstorming");
+            return textResult("Implementation complete. Plan mode remains enabled in brainstorming.");
         },
         async command(args, ctx) {
             const command = args?.trim();

@@ -12,7 +12,9 @@ stateDiagram-v2
     [*] --> brainstorming : new session or /plan
     brainstorming --> brainstorming : reject or ask for review
     brainstorming --> implementing : accept plan_propose
-    implementing --> off : plan_complete
+    implementing --> brainstorming : plan_complete
+    brainstorming --> off : /plan disable
+    implementing --> off : /plan disable
 ```
 
 ## Workflow
@@ -21,7 +23,7 @@ The agent uses three control tools:
 
 - `plan_ask` — ask choice questions before proposing.
 - `plan_propose` — submit one complete proposal for review, including the changes and any tests worth adding.
-- `plan_complete` — finish accepted implementation, then disable plan mode.
+- `plan_complete` — finish an accepted implementation and return to brainstorming for the next cycle; it never disables plan mode.
 
 A proposal contains:
 
@@ -35,11 +37,11 @@ The plan phase follows the session tree: navigating to another branch restores t
 
 ## Commands
 
-| State         | Command         | Result                                         |
-| ------------- | --------------- | ---------------------------------------------- |
-| Off           | `/plan`         | Enter brainstorming.                           |
-| Brainstorming | `/plan review`  | Review the stored proposal.                    |
-| Enabled       | `/plan disable` | Exit plan mode and restore the original tools. |
+| State         | Command         | Result                                                                             |
+| ------------- | --------------- | ---------------------------------------------------------------------------------- |
+| Off           | `/plan`         | Enter brainstorming.                                                               |
+| Brainstorming | `/plan review`  | Review the stored proposal.                                                        |
+| Enabled       | `/plan disable` | Exit plan mode and restore the original tools; this is the only way to disable it. |
 
 ## Permissions
 
@@ -51,7 +53,7 @@ During brainstorming, the agent can use:
 - `plan_propose`
 - any tool named in `plan.json` or the `allowedTools` option, when the session already has it active
 
-Shell, editing, and MCP tools are not active before acceptance. After acceptance, the saved tools are restored together with `plan_complete`. `plan_complete` disables plan mode.
+Shell, editing, and MCP tools are not active before acceptance. After acceptance, the saved tools are restored together with `plan_complete`. When the agent completes the implementation, `plan_complete` returns it to restricted brainstorming and clears the proposal; only `/plan disable` exits plan mode.
 
 ## Configuration
 
