@@ -1,58 +1,42 @@
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
 import { Type } from "typebox";
-import { loadPlanConfig, parseAllowedTools, planConfigPath } from "./config.ts";
+import { emptyModes, loadPlanConfig, planConfigPath, splitModelRef, type PlanModes } from "./config.ts";
 import { createPlanController, PLAN_ASK_SCHEMA, PLAN_TOOLS } from "./plan.ts";
-import { normalizePlanModeData, PLAN_PROPOSAL_SCHEMA, type PlanModeData, type PlanState } from "./state.ts";
-
-export interface PlanModeOptions {
-    loadPrompt?: (phase: PlanState) => string | null;
-    allowedTools?: string[];
-}
+import { createPromptLoader } from "./prompts.ts";
+import { PLAN_PROPOSAL_SCHEMA, PROPOSAL_ENTRY } from "./proposal.ts";
+import { normalizePlanModeData, PLAN_MODE_ENTRY, type PlanModeData } from "./state.ts";
 
 /** Registers the agent-driven plan workflow. */
-export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}): void {
-    const promptCache = new Map<PlanState, string>();
-    let fileAllowedTools: string[] = [];
+export default function planMode(pi: ExtensionAPI): void {
+    const prompts = createPromptLoader(new URL("../prompts/", import.meta.url));
+    let modes: PlanModes = emptyModes();
 
-    pi.registerEntryRenderer("plan-proposal", (entry) => {
+    pi.registerEntryRenderer(PROPOSAL_ENTRY, (entry) => {
         const data = entry.data as { markdown?: unknown } | undefined;
         const markdown = typeof data?.markdown === "string" ? data.markdown : "";
         return new Markdown(markdown, 0, 0, getMarkdownTheme());
     });
 
-    /** Reads one bundled prompt file, or returns null when it is missing. */
-    function readPromptFile(name: string): string | null {
-        try {
-            return readFileSync(new URL(`../prompts/${name}`, import.meta.url), "utf8");
-        } catch (error) {
-            if ((error as { code?: string }).code === "ENOENT") return null;
-            throw error;
-        }
-    }
-
-    /** Loads and caches the prompt contract for a phase. */
-    function loadPhasePrompt(phase: PlanState): string | null {
-        const cached = promptCache.get(phase);
-        if (cached) return cached;
-        const content = (options.loadPrompt ?? ((value: PlanState) => readPromptFile(`${value}.md`)))(phase);
-        if (content) promptCache.set(phase, content);
-        return content;
-    }
-
     const controller = createPlanController({
-        getAllowedTools: () => [...parseAllowedTools(options.allowedTools ?? []), ...fileAllowedTools],
+        getModes: () => modes,
         getActiveTools: () => pi.getActiveTools(),
         setActiveTools: (tools) => pi.setActiveTools(tools),
-        persist: (data) => pi.appendEntry("plan-mode", data),
+        getModel: (ctx) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+        setModel: async (ref, ctx) => {
+            const parts = splitModelRef(ref);
+            const model = parts ? ctx.modelRegistry.find(parts.provider, parts.id) : undefined;
+            return model ? pi.setModel(model) : false;
+        },
+        persist: (state) => pi.appendEntry(PLAN_MODE_ENTRY, state),
+        displayProposal: (markdown) => pi.appendEntry(PROPOSAL_ENTRY, { markdown }),
         sendUserMessage: (message) => pi.sendUserMessage(message),
-        appendDisplay: (type, data) => pi.appendEntry(type, data),
-        loadPrompt: loadPhasePrompt,
+        loadPrompt: (phase) => prompts.load(phase),
     });
 
     pi.registerTool({
         name: PLAN_TOOLS.propose,
+        exposure: "model-only",
         label: "Propose Plan",
         description: "Submit one complete proposal for user review and acceptance",
         parameters: PLAN_PROPOSAL_SCHEMA,
@@ -63,6 +47,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
 
     pi.registerTool({
         name: PLAN_TOOLS.complete,
+        exposure: "model-only",
         label: "Complete Plan",
         description: "Complete the accepted proposal after implementation and checks",
         parameters: Type.Object({}),
@@ -73,6 +58,7 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
 
     pi.registerTool({
         name: PLAN_TOOLS.ask,
+        exposure: "model-only",
         label: "Ask Clarifying Questions",
         description: "Ask the user one or more choice questions before you submit a proposal",
         parameters: PLAN_ASK_SCHEMA,
@@ -119,25 +105,24 @@ export default function planMode(pi: ExtensionAPI, options: PlanModeOptions = {}
         controller.onShutdown();
     });
 
-    /** Reads the plan-mode state saved on the active branch, if any. */
+    /** Reads the plan state saved on the active branch, if any. */
     function readBranchState(ctx: ExtensionContext): PlanModeData | undefined {
         const entry = ctx.sessionManager
             .getBranch()
-            .filter((candidate) => candidate.type === "custom" && candidate.customType === "plan-mode")
-            .pop() as { data?: unknown } | undefined;
-        return entry ? normalizePlanModeData(entry.data, controller.baseTools()) : undefined;
+            .findLast((candidate) => candidate.type === "custom" && candidate.customType === PLAN_MODE_ENTRY);
+        return entry?.type === "custom" ? normalizePlanModeData(entry.data, controller.baseTools()) : undefined;
     }
 
     pi.on("session_start", (_event, ctx) => {
-        promptCache.clear();
+        prompts.clear();
         const config = loadPlanConfig(planConfigPath());
-        fileAllowedTools = config.allowedTools;
-        for (const error of config.errors) ctx.ui.notify(error, "warning");
-        controller.start(ctx, readBranchState(ctx));
+        modes = config.modes;
+        for (const error of config.errors) ctx.ui.notify(`Plan mode: ${error}`, "warning");
+        return controller.start(ctx, readBranchState(ctx));
     });
 
     pi.on("session_tree", (_event, ctx) => {
-        const data = readBranchState(ctx);
-        if (data) controller.resume(ctx, data);
+        const restored = readBranchState(ctx);
+        return restored ? controller.resume(ctx, restored) : undefined;
     });
 }

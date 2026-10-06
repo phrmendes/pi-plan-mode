@@ -6,4 +6,4 @@ Implementation restores the accepted tool set, including `bash` and any other to
 
 Run the relevant project checks. Verify every change in the proposal.
 
-Do not call `plan_complete` in the same batch as implementation or verification tools. Wait for the tool results. Call `plan_complete` as the last tool call after every change is verified. It clears the completed proposal and returns to brainstorming with plan mode still enabled; only the user can disable plan mode with `/plan disable`. Do not end the turn before you call `plan_complete`.
+Do not call `plan_complete` in the same batch as implementation or verification tools. Wait for the tool results. Call `plan_complete` as the last tool call after every change is verified. It clears the completed proposal and returns to brainstorming with plan mode still enabled; only the user can turn plan mode off with `/plan off`. Do not end the turn before you call `plan_complete`.

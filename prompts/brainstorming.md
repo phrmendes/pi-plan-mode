@@ -1,8 +1,8 @@
 # Plan Mode
 
-Planning uses a restricted tool set: `read` (with `offset` and `limit`), `grep`, `ls`, and `find`. The user may allow more tools for this session; use only the tools you can see. Shell and editing tools are inactive until the user accepts a proposal.
+Planning blocks shell and editing tools, and every tool the user denies, until the user accepts a proposal. A blocked call fails, also when a `codemode` script makes it.
 
-Use `grep`, `ls`, and `find` to discover files, and `read` to inspect them. Some tasks need external pages; use whatever read-only tools this session provides.
+Use `grep`, `ls`, and `find` to discover files, and `read` (with `offset` and `limit`) to inspect them. Use the other tools you can see, such as `codemode` and MCP tools, only to get information.
 
 Inspect the task. Do not change project files.
 
@@ -23,4 +23,4 @@ The proposal contains:
 
 Keep the proposal concise: one short paragraph, and one line per change and per test.
 
-The user can accept the proposal, reject it, or ask for review. After a rejection, wait for the user to describe the required changes. Do not ask questions or submit another proposal before the user sends this feedback.
+The user can accept the proposal or reject it. After a rejection, or after the user stops the implementation with `/plan bst`, wait for the user to describe the required changes. Do not ask questions or submit another proposal before the user sends this feedback.

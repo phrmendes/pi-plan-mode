@@ -3,61 +3,139 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPlanConfig, parseAllowedTools } from "./config.ts";
+import { emptyModes, loadPlanConfig, splitModelRef } from "./config.ts";
 
 /** Writes a plan.json file in a fresh temp directory and returns its path. */
-function planFile(contents: string): string {
+function planFile(contents: unknown): string {
     const path = join(mkdtempSync(join(tmpdir(), "pi-plan-mode-config-")), "plan.json");
-    writeFileSync(path, contents);
+    writeFileSync(path, typeof contents === "string" ? contents : JSON.stringify(contents));
     return path;
 }
 
-test("parseAllowedTools keeps meaningful unique tool names", () => {
-    assert.deepEqual(parseAllowedTools([" mcp__docs__* ", "", 42, "mcp__docs__*", "task"]), ["mcp__docs__*", "task"]);
-});
+const MODEL_REFS: Array<{ name: string; ref: string; expected: { provider: string; id: string } | undefined }> = [
+    { name: "plain id", ref: "deepseek/deepseek-flash", expected: { provider: "deepseek", id: "deepseek-flash" } },
+    {
+        name: "id that contains a slash",
+        ref: "bifrost-openai/Huawei/deepseek-v4-pro",
+        expected: { provider: "bifrost-openai", id: "Huawei/deepseek-v4-pro" },
+    },
+    {
+        name: "surrounding spaces",
+        ref: " deepseek / deepseek-flash ",
+        expected: { provider: "deepseek", id: "deepseek-flash" },
+    },
+    { name: "no provider separator", ref: "deepseek-flash", expected: undefined },
+    { name: "empty provider", ref: "/deepseek-flash", expected: undefined },
+    { name: "empty id", ref: "deepseek/", expected: undefined },
+    { name: "empty value", ref: "", expected: undefined },
+];
 
-test("parseAllowedTools rejects non-array values", () => {
-    assert.deepEqual(parseAllowedTools("mcp__docs__*"), []);
-    assert.deepEqual(parseAllowedTools({ 0: "task" }), []);
-    assert.deepEqual(parseAllowedTools(undefined), []);
-});
+for (const { name, ref, expected } of MODEL_REFS) {
+    test(`splitModelRef: ${name}`, () => {
+        assert.deepEqual(splitModelRef(ref), expected);
+    });
+}
 
-test("loadPlanConfig reads an allowlist", () => {
-    const path = planFile(JSON.stringify({ allowedTools: ["mcp__docs__*", "task"] }));
-    assert.deepEqual(loadPlanConfig(path), { allowedTools: ["mcp__docs__*", "task"], errors: [] });
-});
-
-test("loadPlanConfig treats a missing file and an absent allowlist as empty", () => {
-    assert.deepEqual(loadPlanConfig(join(tmpdir(), "pi-plan-mode-missing", "plan.json")), {
-        allowedTools: [],
+test("loadPlanConfig reads the models and the deny list of each mode", () => {
+    const path = planFile({
+        modes: {
+            brainstorming: {
+                model: "bifrost-anthropic/claude-opus-5-5",
+                deniedTools: [" mcp__k8s__* ", "", 42, "mcp__k8s__*"],
+            },
+            thinking: { model: "bifrost-anthropic/claude-opus-5-5" },
+            implementing: { model: " bifrost-openai/Huawei/deepseek-v4-pro " },
+        },
+    });
+    assert.deepEqual(loadPlanConfig(path), {
+        modes: {
+            brainstorming: { model: "bifrost-anthropic/claude-opus-5-5", deniedTools: ["mcp__k8s__*"] },
+            implementing: { model: "bifrost-openai/Huawei/deepseek-v4-pro" },
+            thinking: { model: "bifrost-anthropic/claude-opus-5-5" },
+        },
         errors: [],
     });
-    assert.deepEqual(loadPlanConfig(planFile("{}")), { allowedTools: [], errors: [] });
 });
 
-test("loadPlanConfig reports malformed JSON", () => {
-    const config = loadPlanConfig(planFile("{ not json"));
-    assert.deepEqual(config.allowedTools, []);
-    assert.equal(config.errors.length, 1);
-    assert.match(config.errors[0], /plan\.json: /);
-});
+const EMPTY_CONFIGS: Array<{ name: string; path: () => string }> = [
+    { name: "a missing file", path: () => join(tmpdir(), "pi-plan-mode-missing", "plan.json") },
+    { name: "a blank file", path: () => planFile("  \n") },
+    { name: "an object without modes", path: () => planFile({}) },
+    { name: "modes without phases", path: () => planFile({ modes: {} }) },
+];
 
-test("loadPlanConfig reports a malformed allowedTools value", () => {
-    const config = loadPlanConfig(planFile(JSON.stringify({ allowedTools: "mcp__docs__*" })));
-    assert.deepEqual(config.allowedTools, []);
-    assert.equal(config.errors.length, 1);
-    assert.match(config.errors[0], /must be an array/);
-});
+for (const { name, path } of EMPTY_CONFIGS) {
+    test(`loadPlanConfig treats ${name} as no configuration`, () => {
+        assert.deepEqual(loadPlanConfig(path()), { modes: emptyModes(), errors: [] });
+    });
+}
 
-test("loadPlanConfig treats an empty or blank file as no configuration", () => {
-    assert.deepEqual(loadPlanConfig(planFile("")), { allowedTools: [], errors: [] });
-    assert.deepEqual(loadPlanConfig(planFile("  \n")), { allowedTools: [], errors: [] });
-});
+const INVALID_CONFIGS: Array<{ name: string; contents: unknown; error: RegExp }> = [
+    { name: "malformed JSON", contents: "{ not json", error: /plan\.json: / },
+    { name: "a JSON array", contents: [], error: /expected a JSON object/ },
+    { name: "modes that is not an object", contents: { modes: [] }, error: /"modes" must be an object/ },
+    {
+        name: "a phase that is not an object",
+        contents: { modes: { brainstorming: "fast" } },
+        error: /"modes\.brainstorming" must be an object/,
+    },
+    {
+        name: "a model without a provider",
+        contents: { modes: { implementing: { model: "deepseek-flash" } } },
+        error: /"modes\.implementing\.model" must be "provider\/id"/,
+    },
+    {
+        name: "a model that is not text",
+        contents: { modes: { brainstorming: { model: 42 } } },
+        error: /"modes\.brainstorming\.model" must be "provider\/id"/,
+    },
+    {
+        name: "a thinking model without a provider",
+        contents: { modes: { thinking: { model: "opus" } } },
+        error: /"modes\.thinking\.model" must be "provider\/id"/,
+    },
+    {
+        name: "a deny list that is not an array",
+        contents: { modes: { brainstorming: { deniedTools: "mcp__k8s__*" } } },
+        error: /"modes\.brainstorming\.deniedTools" must be an array/,
+    },
+];
 
-test("a bare wildcard is dropped and reported", () => {
-    assert.deepEqual(parseAllowedTools(["*", " * ", "task"]), ["task"]);
-    const config = loadPlanConfig(planFile(JSON.stringify({ allowedTools: ["*", "task"] })));
-    assert.deepEqual(config.allowedTools, ["task"]);
+for (const { name, contents, error } of INVALID_CONFIGS) {
+    test(`loadPlanConfig reports ${name} and ignores the bad value`, () => {
+        const config = loadPlanConfig(planFile(contents));
+        assert.deepEqual(config.modes, emptyModes());
+        assert.equal(config.errors.length, 1);
+        assert.match(config.errors[0], error);
+    });
+}
+
+test("a bare wildcard in the deny list is dropped and reported", () => {
+    const config = loadPlanConfig(planFile({ modes: { brainstorming: { deniedTools: ["*", " * ", "task"] } } }));
+    assert.deepEqual(config.modes.brainstorming.deniedTools, ["task"]);
     assert.equal(config.errors.length, 1);
     assert.match(config.errors[0], /every tool/);
+});
+
+test("a legacy allowedTools key is reported and the modes still load", () => {
+    const config = loadPlanConfig(
+        planFile({ allowedTools: ["mcp__docs__*"], modes: { brainstorming: { deniedTools: ["task"] } } }),
+    );
+    assert.deepEqual(config.modes.brainstorming.deniedTools, ["task"]);
+    assert.equal(config.errors.length, 1);
+    assert.match(config.errors[0], /"allowedTools" is no longer supported/);
+});
+
+test("one bad value does not discard the valid values next to it", () => {
+    const config = loadPlanConfig(
+        planFile({
+            modes: { brainstorming: { model: "nope", deniedTools: ["task"] }, implementing: { model: "a/b" } },
+        }),
+    );
+    assert.deepEqual(config.modes, {
+        brainstorming: { deniedTools: ["task"] },
+        implementing: { model: "a/b" },
+        thinking: {},
+    });
+    assert.equal(config.errors.length, 1);
 });

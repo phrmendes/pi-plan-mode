@@ -1,19 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createPlanController, formatProposal } from "./plan.ts";
-import type { PlanModeData, PlanProposal, PlanState } from "./state.ts";
+import { createPlanController } from "./plan.ts";
+import { formatProposal, type PlanProposal } from "./proposal.ts";
+import type { PlanModes } from "./config.ts";
+import type { PlanModeData, PlanState } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const MCP_TOOLS = ["mcp__browser__open", "mcp__browser__click", "mcp__docs__search"];
 const ALL_TOOLS = [...FULL_TOOLS, ...MCP_TOOLS];
+const BRAINSTORMING_TOOLS = ["read", "grep", "ls", "find", "plan_propose", "plan_ask"];
 const PROPOSAL: PlanProposal = {
     description: "Simplify the proposal flow so one tool handles submission and acceptance.",
     changes: [
         {
             path: "src/index.ts",
             change: "Simplify orchestration and remove duplicate actions",
-            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+            example: '"deniedTools": ["mcp__browser__*"]',
         },
         { path: "src/index.test.ts", change: "Cover the simplified registration" },
     ],
@@ -28,7 +31,11 @@ const PROPOSAL: PlanProposal = {
 
 interface PlanHarnessOptions {
     tools?: string[];
-    allowedTools?: string[];
+    deniedTools?: string[];
+    models?: { brainstorming?: string; implementing?: string; thinking?: string };
+    model?: string;
+    available?: string[];
+    setModelError?: Error;
     data?: PlanModeData;
     choices?: (string | undefined)[];
     inputs?: (string | undefined)[];
@@ -39,6 +46,10 @@ interface PlanHarnessOptions {
 function createPlanHarness(options: PlanHarnessOptions = {}) {
     let activeTools = options.tools ?? [...FULL_TOOLS];
     let setActiveToolsCalls = 0;
+    let model = options.model;
+    const models = options.models ?? {};
+    const available = options.available ?? [model, models.brainstorming, models.implementing, models.thinking];
+    const modelCalls: string[] = [];
     const persisted: PlanModeData[] = [];
     const displays: unknown[] = [];
     const sent: string[] = [];
@@ -48,11 +59,26 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
     const inputs = options.inputs ?? [];
 
     const controller = createPlanController({
-        getAllowedTools: () => options.allowedTools ?? [],
+        getModes: (): PlanModes => ({
+            brainstorming: {
+                ...(models.brainstorming ? { model: models.brainstorming } : {}),
+                deniedTools: options.deniedTools ?? [],
+            },
+            implementing: models.implementing ? { model: models.implementing } : {},
+            thinking: models.thinking ? { model: models.thinking } : {},
+        }),
         getActiveTools: () => [...activeTools],
         setActiveTools: (tools) => {
             setActiveToolsCalls++;
             activeTools = [...tools];
+        },
+        getModel: () => model,
+        setModel: async (ref) => {
+            modelCalls.push(ref);
+            if (options.setModelError) throw options.setModelError;
+            if (!available.includes(ref)) return false;
+            model = ref;
+            return true;
         },
         persist: (data) => {
             persisted.push(data);
@@ -60,8 +86,8 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         sendUserMessage: (message) => {
             sent.push(message);
         },
-        appendDisplay: (_type, data) => {
-            displays.push(data);
+        displayProposal: (markdown) => {
+            displays.push({ markdown });
         },
         loadPrompt: options.loadPrompt ?? ((phase) => `# ${phase}`),
     });
@@ -87,6 +113,10 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         setActiveTools: (tools: string[]) => {
             activeTools = [...tools];
         },
+        /** Simulates the user picking another model with /model. */
+        pickModel: (ref: string) => {
+            model = ref;
+        },
         get activeTools() {
             return activeTools;
         },
@@ -96,6 +126,10 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         get status() {
             return status;
         },
+        get model() {
+            return model;
+        },
+        modelCalls,
         persisted,
         displays,
         sent,
@@ -103,29 +137,27 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
     };
 }
 
+/** Starts a harness; tool changes apply at once, and `ready` resolves after the model switch. */
 function startHarness(options: PlanHarnessOptions = {}) {
     const harness = createPlanHarness(options);
-    harness.start(options.data);
-    return harness;
+    const ready = harness.start(options.data);
+    return Object.assign(harness, { ready });
 }
 
 test("formatProposal renders the description, changes, tests, and examples", () => {
     const markdown = formatProposal(PROPOSAL);
     assert.match(markdown, /^## Description\nSimplify the proposal flow/);
     assert.match(markdown, /## Changes\n\n### `src\/index\.ts`\nSimplify orchestration/);
-    assert.match(markdown, /Example:\n\n```\nplanMode\(pi, \{ allowedTools: \["mcp__browser__\*"\] \}\)/);
+    assert.match(markdown, /Example:\n\n```\n"deniedTools": \["mcp__browser__\*"\]/);
     assert.match(markdown, /### `src\/index\.test\.ts`\nCover the simplified registration/);
     assert.match(markdown, /## Tests\n\n### `src\/plan\.test\.ts`\nRejects a proposal without a description/);
     assert.ok(markdown.indexOf("## Tests") > markdown.indexOf("### `src/index.test.ts`"));
 });
 
-test("fresh session enters brainstorming with the restricted tool set", () => {
+test("fresh session enters brainstorming without the default denied tools", () => {
     const h = startHarness();
     assert.equal(h.status, "plan: brainstorming");
-    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
-    assert.ok(!h.activeTools.includes("bash"));
-    assert.ok(!h.activeTools.includes("edit"));
-    assert.ok(!h.activeTools.includes("write"));
+    assert.deepEqual(h.activeTools, BRAINSTORMING_TOOLS);
 });
 
 test("accepting restores the saved tools and enables plan_complete", async () => {
@@ -145,19 +177,8 @@ test("propose stores and returns the formatted proposal without UI", async () =>
     assert.match(result.content[0].text, /## Description/);
 });
 
-test("propose rejects placeholder content", async () => {
-    const h = startHarness();
-    await assert.rejects(h.controller.propose({ ...PROPOSAL, description: "TBD" }, h.ctx), /placeholder/i);
-});
-
-test("propose rejects a meaningless test entry", async () => {
-    const h = startHarness();
-    const proposal = { ...PROPOSAL, tests: [{ path: "src/plan.test.ts", test: "ok" }] };
-    await assert.rejects(h.controller.propose(proposal, h.ctx), /meaningful path and behavior/i);
-});
-
 test("propose accepts any descriptive path, including commands and absolute paths", async () => {
-    const h = startHarness();
+    const h = startHarness({ hasUI: false });
     const proposal = {
         ...PROPOSAL,
         changes: [
@@ -172,14 +193,14 @@ test("propose accepts any descriptive path, including commands and absolute path
 });
 
 test("propose accepts a proposal without tests", async () => {
-    const h = startHarness();
+    const h = startHarness({ hasUI: false });
     const { tests: _tests, ...withoutTests } = PROPOSAL;
     await h.controller.propose(withoutTests, h.ctx);
     assert.deepEqual(h.persisted.at(-1)?.proposal, withoutTests);
 });
 
 test("propose accepts legitimate words that resemble placeholders", async () => {
-    const h = startHarness();
+    const h = startHarness({ hasUI: false });
     const proposal = {
         ...PROPOSAL,
         changes: [{ path: "src/index.ts", change: "Handle unknown host names and CSV, JSON, etc." }],
@@ -206,13 +227,29 @@ test("rejection blocks new proposals and questions until user feedback", async (
     await h.controller.ask({ questions: [{ question: "q", options: ["a"] }] }, h.ctx);
 });
 
-test("asking for review keeps the proposal for plan review", async () => {
-    const h = startHarness({ choices: ["Ask for review", "Accept and implement"] });
+test("the review dialog offers only accept and reject", async () => {
+    let offered: string[] = [];
+    const h = startHarness();
+    const ctx = {
+        ...h.ctx,
+        ui: {
+            ...h.ctx.ui,
+            select: async (_title: string, options: string[]) => {
+                offered = options;
+                return undefined;
+            },
+        },
+    } as typeof h.ctx;
+    await h.controller.propose(PROPOSAL, ctx);
+    assert.deepEqual(offered, ["Accept and implement", "Reject"]);
+});
+
+test("closing the review without a choice rejects the proposal", async () => {
+    const h = startHarness({ choices: [undefined] });
     const result = await h.controller.propose(PROPOSAL, h.ctx);
-    assert.match(result.content[0].text, /\/plan review/);
-    assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
-    await h.controller.command("review", h.ctx);
-    assert.equal(h.status, "plan: implementing");
+    assert.match(result.content[0].text, /rejected/i);
+    assert.equal(h.persisted.at(-1)?.proposal, undefined);
+    assert.equal(h.status, "plan: waiting for feedback");
 });
 
 test("plan_complete returns to brainstorming and clears the proposal", async () => {
@@ -258,41 +295,39 @@ test("agent_settled does not remind while tools are in flight", async () => {
 });
 
 test("command completions follow the current phase", async () => {
-    const h = startHarness({ data: { phase: "off", savedTools: FULL_TOOLS } });
-    assert.deepEqual(h.controller.completions(""), null);
+    const h = startHarness({ data: { phase: "off", savedTools: FULL_TOOLS }, choices: ["Accept and implement"] });
+    const values = (prefix: string) => h.controller.completions(prefix)?.map((item) => item.value) ?? null;
+    assert.equal(values(""), null);
     await h.controller.command(undefined, h.ctx);
-    assert.deepEqual(
-        h.controller.completions("")?.map((item) => item.value),
-        ["review", "disable"],
-    );
-    assert.deepEqual(
-        h.controller.completions("re")?.map((item) => item.value),
-        ["review"],
-    );
-    assert.deepEqual(h.controller.completions("nope"), null);
+    assert.deepEqual(values(""), ["impl", "thk", "off"]);
+    assert.deepEqual(values("im"), ["impl"]);
+    assert.equal(values("nope"), null);
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.deepEqual(values(""), ["bst", "off"]);
 });
 
-test("review reports when no proposal is stored", async () => {
-    const h = startHarness();
-    await h.controller.command("review", h.ctx);
-    assert.match(h.notes.at(-1) ?? "", /no stored proposal/i);
+test("a missing phase prompt warns once and leaves the system prompt alone", () => {
+    const h = startHarness({ loadPrompt: () => null });
+    assert.equal(h.controller.beforeAgentStart("base", h.ctx), undefined);
+    assert.equal(h.controller.beforeAgentStart("base", h.ctx), undefined);
+    assert.equal(h.notes.filter((note) => /prompt .*missing/i.test(note)).length, 1);
 });
 
-test("disable is available only while plan mode is enabled", async () => {
+test("/plan off works only while plan mode is on", async () => {
     const h = startHarness();
-    await h.controller.command("disable", h.ctx);
+    await h.controller.command("off", h.ctx);
     assert.equal(h.status, undefined);
     assert.deepEqual(h.activeTools, FULL_TOOLS);
-    await h.controller.command("disable", h.ctx);
-    assert.match(h.notes.at(-1) ?? "", /already disabled/i);
+    await h.controller.command("off", h.ctx);
+    assert.match(h.notes.at(-1) ?? "", /run \/plan to start/i);
 });
 
-test("disable is blocked while implementation tools are in flight", async () => {
+test("/plan off is blocked while implementation tools are in flight", async () => {
     const h = startHarness({
         data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
     });
     h.controller.onToolExecutionStart("edit-1", "edit");
-    await h.controller.command("disable", h.ctx);
+    await h.controller.command("off", h.ctx);
     assert.equal(h.status, "plan: implementing");
     assert.match(h.notes.at(-1) ?? "", /wait for implementation tools/i);
 });
@@ -336,82 +371,8 @@ test("prompt composition appends the proposal during implementation", () => {
     assert.match(result?.systemPrompt ?? "", /## Tests/);
 });
 
-test("brainstorming keeps read-only built-ins and every whitelisted active tool", () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["mcp__browser__open", "mcp__docs__*"] });
-    assert.deepEqual(h.activeTools, [
-        "read",
-        "grep",
-        "ls",
-        "find",
-        "mcp__browser__open",
-        "mcp__docs__search",
-        "plan_propose",
-        "plan_ask",
-    ]);
-});
-
-test("brainstorming blocks all MCP tools by default", () => {
+test("brainstorming keeps every active tool that is not denied", () => {
     const h = startHarness({ tools: ALL_TOOLS });
-    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
-    for (const name of MCP_TOOLS) {
-        assert.match(h.controller.blockReason(name) ?? "", /not available/i, name);
-    }
-});
-
-test("brainstorming never activates a whitelisted tool that was inactive", () => {
-    const h = startHarness({ tools: FULL_TOOLS, allowedTools: ["mcp__browser__*"] });
-    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
-});
-
-test("the allowlist accepts any tool name, not only MCP tools", () => {
-    const h = startHarness({ tools: [...FULL_TOOLS, "task", "mcp__browser__open"], allowedTools: ["task"] });
-    assert.ok(h.activeTools.includes("task"));
-    assert.ok(!h.activeTools.includes("mcp__browser__open"));
-    assert.equal(h.controller.blockReason("task"), undefined);
-});
-
-test("brainstorming blocks every tool outside the allowed set", () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["mcp__browser__*"] });
-    for (const allowed of ["read", "grep", "ls", "find", "mcp__browser__open", "plan_propose"]) {
-        assert.equal(h.controller.blockReason(allowed), undefined, allowed);
-    }
-    for (const blocked of ["bash", "edit", "write", "mcp__docs__search"]) {
-        assert.match(h.controller.blockReason(blocked) ?? "", /not available/i, blocked);
-    }
-});
-
-test("implementation enables every saved tool", () => {
-    const h = startHarness({
-        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
-    });
-    assert.deepEqual(h.activeTools, [...ALL_TOOLS, "plan_complete"]);
-});
-
-test("implementation does not block tool calls", () => {
-    const h = startHarness({
-        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
-    });
-    assert.equal(h.controller.blockReason("bash"), undefined);
-    assert.equal(h.controller.blockReason("mcp__docs__search"), undefined);
-});
-
-test("leaving plan mode drops the tools plan mode added and keeps later ones", async () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["mcp__browser__*"] });
-    h.setActiveTools([...h.activeTools, "mcp__late__tool"]);
-    await h.controller.command("disable", h.ctx);
-    assert.deepEqual(h.activeTools, [...ALL_TOOLS, "mcp__late__tool"]);
-});
-
-test("completing returns to brainstorming with only whitelisted tools", async () => {
-    const h = startHarness({
-        tools: ALL_TOOLS,
-        allowedTools: ["mcp__browser__*"],
-        choices: ["Accept and implement"],
-    });
-    assert.ok(h.activeTools.includes("mcp__browser__open"));
-    await h.controller.propose(PROPOSAL, h.ctx);
-    assert.deepEqual(h.activeTools, [...ALL_TOOLS, "plan_complete"]);
-    await h.controller.complete(h.ctx);
     assert.deepEqual(h.activeTools, [
         "read",
         "grep",
@@ -419,44 +380,94 @@ test("completing returns to brainstorming with only whitelisted tools", async ()
         "find",
         "mcp__browser__open",
         "mcp__browser__click",
+        "mcp__docs__search",
         "plan_propose",
         "plan_ask",
     ]);
 });
 
-test("a tool that connects after startup is adopted, and only allowed ones stay active", async () => {
-    const h = startHarness({ tools: FULL_TOOLS, allowedTools: ["mcp__docs__search"] });
+const DEFAULT_DENIED = ["bash", "powershell", "edit", "write"];
+
+for (const tool of DEFAULT_DENIED) {
+    test(`brainstorming always blocks the default denied tool ${tool}`, () => {
+        const h = startHarness({ tools: [...ALL_TOOLS, "powershell"] });
+        assert.ok(!h.activeTools.includes(tool));
+        assert.match(h.controller.blockReason(tool) ?? "", /not available during brainstorming/i);
+    });
+}
+
+test("configured denied tools are inactive and blocked, by exact name or prefix", () => {
+    const h = startHarness({ tools: ALL_TOOLS, deniedTools: ["mcp__browser__click", "mcp__docs__*"] });
+    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "mcp__browser__open", "plan_propose", "plan_ask"]);
+    for (const denied of ["mcp__browser__click", "mcp__docs__search"]) {
+        assert.match(h.controller.blockReason(denied) ?? "", /not available/i, denied);
+    }
+    assert.equal(h.controller.blockReason("mcp__browser__open"), undefined);
+});
+
+test("a tool reached only through codemode is allowed unless denied", () => {
+    const h = startHarness({ tools: FULL_TOOLS, deniedTools: ["mcp__k8s__k8s_pod_exec"] });
+    assert.equal(h.controller.blockReason("mcp__k8s__list_k8s_pods"), undefined);
+    assert.match(h.controller.blockReason("mcp__k8s__k8s_pod_exec") ?? "", /not available/i);
+});
+
+test("a deny entry can remove a discovery tool", () => {
+    const h = startHarness({ deniedTools: ["grep"] });
+    assert.deepEqual(h.activeTools, ["read", "ls", "find", "plan_propose", "plan_ask"]);
+    assert.match(h.controller.blockReason("grep") ?? "", /not available/i);
+});
+
+test("a deny entry never blocks the plan control tools", () => {
+    const h = startHarness({ deniedTools: ["plan_*"] });
+    assert.deepEqual(h.activeTools, BRAINSTORMING_TOOLS);
+    assert.equal(h.controller.blockReason("plan_propose"), undefined);
+});
+
+test("implementation does not block default or configured denied tools", () => {
+    const h = startHarness({
+        deniedTools: ["mcp__docs__*"],
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
+    });
+    assert.equal(h.controller.blockReason("bash"), undefined);
+    assert.equal(h.controller.blockReason("mcp__docs__search"), undefined);
+});
+
+test("leaving plan mode drops the tools plan mode added and keeps later ones", async () => {
+    const h = startHarness({ tools: ALL_TOOLS });
+    h.setActiveTools([...h.activeTools, "mcp__late__tool"]);
+    await h.controller.command("off", h.ctx);
+    assert.deepEqual(h.activeTools, [...ALL_TOOLS, "mcp__late__tool"]);
+});
+
+test("a tool that connects after startup is adopted, and denied ones stay inactive", async () => {
+    const h = startHarness({ tools: FULL_TOOLS, deniedTools: ["mcp__browser__*"] });
     h.setActiveTools([...h.activeTools, "mcp__docs__search", "mcp__browser__open"]);
     h.controller.beforeAgentStart("base", h.ctx);
     assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "mcp__docs__search", "plan_propose", "plan_ask"]);
     assert.equal(h.controller.blockReason("mcp__docs__search"), undefined);
     assert.match(h.controller.blockReason("mcp__browser__open") ?? "", /not available/i);
-    await h.controller.command("disable", h.ctx);
+    await h.controller.command("off", h.ctx);
     assert.deepEqual(h.activeTools, [...FULL_TOOLS, "mcp__docs__search", "mcp__browser__open"]);
 });
 
-test("an allowed tool is not blocked before the next sync", () => {
-    const h = startHarness({ tools: FULL_TOOLS, allowedTools: ["mcp__docs__*"] });
-    h.setActiveTools([...h.activeTools, "mcp__docs__search"]);
-    assert.equal(h.controller.blockReason("mcp__docs__search"), undefined);
-    assert.match(h.controller.blockReason("mcp__browser__open") ?? "", /not available/i);
-});
-
 test("syncing tools does nothing when the active set is already correct", () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["mcp__browser__*"] });
+    const h = startHarness({ tools: ALL_TOOLS, deniedTools: ["mcp__browser__*"] });
     const calls = h.setActiveToolsCalls;
     h.controller.beforeAgentStart("base", h.ctx);
     h.controller.beforeAgentStart("base", h.ctx);
     assert.equal(h.setActiveToolsCalls, calls);
 });
 
-test("a tool that connects during implementation is restricted after completion", async () => {
-    const h = startHarness({ data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS } });
+test("a tool that connects during implementation is denied again after completion", async () => {
+    const h = startHarness({
+        deniedTools: ["mcp__docs__*"],
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
+    });
     h.setActiveTools([...h.activeTools, "mcp__docs__search"]);
     h.controller.beforeAgentStart("base", h.ctx);
     assert.ok(h.activeTools.includes("mcp__docs__search"));
     await h.controller.complete(h.ctx);
-    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
+    assert.deepEqual(h.activeTools, BRAINSTORMING_TOOLS);
 });
 
 test("plan control tools are removed while plan mode is off", () => {
@@ -471,28 +482,22 @@ test("plan control tools are removed while plan mode is off", () => {
 });
 
 test("persisted plan state is a snapshot, not a live reference", async () => {
-    const h = startHarness({ choices: ["Ask for review"] });
+    const h = startHarness({ hasUI: false });
     await h.controller.propose(PROPOSAL, h.ctx);
     assert.equal(h.persisted[0].proposal, undefined);
     assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
     assert.notEqual(h.persisted[0], h.persisted.at(-1));
 });
 
-test("a bare wildcard in the allowlist never opens every tool", () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["*"] });
-    assert.deepEqual(h.activeTools, ["read", "grep", "ls", "find", "plan_propose", "plan_ask"]);
-    assert.match(h.controller.blockReason("bash") ?? "", /not available/i);
-});
-
-test("resuming another branch restores that branch's phase and tools", () => {
-    const h = startHarness({ tools: ALL_TOOLS, allowedTools: ["mcp__browser__*"] });
-    h.controller.resume(h.ctx, { phase: "off", savedTools: [] });
+test("resuming another branch restores that branch's phase and tools", async () => {
+    const h = startHarness({ tools: ALL_TOOLS, deniedTools: ["mcp__browser__click"] });
+    await h.controller.resume(h.ctx, { phase: "off", savedTools: [] });
     assert.equal(h.status, undefined);
     assert.deepEqual(h.activeTools, ALL_TOOLS);
-    h.controller.resume(h.ctx, { phase: "implementing", proposal: PROPOSAL, savedTools: [] });
+    await h.controller.resume(h.ctx, { phase: "implementing", proposal: PROPOSAL, savedTools: [] });
     assert.equal(h.status, "plan: implementing");
     assert.deepEqual(h.activeTools, [...ALL_TOOLS, "plan_complete"]);
-    h.controller.resume(h.ctx, { phase: "brainstorming", savedTools: [] });
+    await h.controller.resume(h.ctx, { phase: "brainstorming", savedTools: [] });
     assert.equal(h.status, "plan: brainstorming");
     assert.deepEqual(h.activeTools, [
         "read",
@@ -500,7 +505,7 @@ test("resuming another branch restores that branch's phase and tools", () => {
         "ls",
         "find",
         "mcp__browser__open",
-        "mcp__browser__click",
+        "mcp__docs__search",
         "plan_propose",
         "plan_ask",
     ]);
@@ -512,4 +517,308 @@ test("resuming an off branch while plan mode is off leaves the tools alone", () 
     h.controller.resume(h.ctx, { phase: "off", savedTools: ["bash"] });
     assert.equal(h.setActiveToolsCalls, calls);
     assert.deepEqual(h.activeTools, FULL_TOOLS);
+});
+
+const MODELS = { brainstorming: "p/plan", implementing: "p/build" };
+
+test("a fresh session switches to the brainstorming model and saves the user's model", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS });
+    await h.ready;
+    assert.equal(h.model, "p/plan");
+    assert.equal(h.persisted.at(-1)?.savedModel, "p/user");
+});
+
+test("each phase change switches to that phase's model", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS, choices: ["Accept and implement"] });
+    await h.ready;
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.model, "p/build");
+    await h.controller.complete(h.ctx);
+    assert.equal(h.model, "p/plan");
+});
+
+test("/plan off restores the model saved before the first switch", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS, choices: ["Accept and implement"] });
+    await h.ready;
+    await h.controller.propose(PROPOSAL, h.ctx);
+    await h.controller.command("off", h.ctx);
+    assert.equal(h.model, "p/user");
+    assert.equal(h.persisted.at(-1)?.savedModel, undefined);
+});
+
+test("a phase without a model returns to the saved model", async () => {
+    const h = startHarness({
+        model: "p/user",
+        models: { brainstorming: "p/plan" },
+        choices: ["Accept and implement"],
+    });
+    await h.ready;
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.model, "p/user");
+});
+
+test("without configured models the model never changes", async () => {
+    const h = startHarness({ model: "p/user", choices: ["Accept and implement"] });
+    await h.ready;
+    h.pickModel("p/manual");
+    await h.controller.propose(PROPOSAL, h.ctx);
+    await h.controller.command("off", h.ctx);
+    assert.equal(h.model, "p/manual");
+    assert.deepEqual(h.modelCalls, []);
+});
+
+test("an unavailable model warns, keeps the current model, and still changes phase", async () => {
+    const h = startHarness({ model: "p/user", models: { brainstorming: "p/missing" }, available: ["p/user"] });
+    await h.ready;
+    assert.equal(h.status, "plan: brainstorming");
+    assert.equal(h.model, "p/user");
+    assert.match(h.notes.at(-1) ?? "", /cannot switch to the model "p\/missing"/);
+    assert.equal(h.persisted.at(-1)?.savedModel, undefined);
+});
+
+test("a model switch that throws warns with the reason", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS, setModelError: new Error("no credentials for p") });
+    await h.ready;
+    assert.equal(h.model, "p/user");
+    assert.match(h.notes.at(-1) ?? "", /no credentials for p/);
+});
+
+test("a manual model change stays until the next phase change", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS, choices: ["Accept and implement"] });
+    await h.ready;
+    h.pickModel("p/manual");
+    h.controller.beforeAgentStart("base", h.ctx);
+    assert.equal(h.model, "p/manual");
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.model, "p/build");
+    await h.controller.command("off", h.ctx);
+    assert.equal(h.model, "p/user");
+});
+
+test("a restored implementing state applies the implementing model", async () => {
+    const h = startHarness({
+        model: "p/plan",
+        models: MODELS,
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS, savedModel: "p/user" },
+    });
+    await h.ready;
+    assert.equal(h.model, "p/build");
+});
+
+test("resuming a branch applies the model of the resumed phase", async () => {
+    const h = startHarness({ model: "p/user", models: MODELS });
+    await h.ready;
+    await h.controller.resume(h.ctx, { phase: "implementing", proposal: PROPOSAL, savedTools: [] });
+    assert.equal(h.model, "p/build");
+    await h.controller.resume(h.ctx, { phase: "off", savedTools: [] });
+    assert.equal(h.model, "p/user");
+});
+
+const IMPLEMENTING: PlanModeData = { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS };
+
+test("/plan bst returns from implementing, keeps the proposal, and waits for feedback", async () => {
+    const h = startHarness({ data: IMPLEMENTING });
+    await h.controller.command("bst", h.ctx);
+    assert.equal(h.status, "plan: waiting for feedback");
+    assert.deepEqual(h.activeTools, BRAINSTORMING_TOOLS);
+    assert.equal(h.persisted.at(-1)?.phase, "brainstorming");
+    assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
+    assert.equal(h.persisted.at(-1)?.waitingForUserFeedback, true);
+    await assert.rejects(h.controller.propose(PROPOSAL, h.ctx), /feedback/i);
+});
+
+test("/plan bst waits for implementation tools to finish", async () => {
+    const h = startHarness({ data: IMPLEMENTING });
+    h.controller.onToolExecutionStart("edit-1", "edit");
+    await h.controller.command("bst", h.ctx);
+    assert.equal(h.status, "plan: implementing");
+    assert.match(h.notes.at(-1) ?? "", /wait for implementation tools to finish/i);
+});
+
+const BRAINSTORM_ELSEWHERE: Array<{ name: string; data: PlanModeData; note: RegExp }> = [
+    {
+        name: "brainstorming",
+        data: { phase: "brainstorming", savedTools: FULL_TOOLS },
+        note: /works only while implementing/i,
+    },
+    { name: "off", data: { phase: "off", savedTools: FULL_TOOLS }, note: /run \/plan to start/i },
+];
+
+for (const { name, data, note } of BRAINSTORM_ELSEWHERE) {
+    test(`/plan bst while ${name} changes nothing and explains why`, async () => {
+        const h = startHarness({ data });
+        const before = h.persisted.length;
+        await h.controller.command("bst", h.ctx);
+        assert.equal(h.persisted.length, before);
+        assert.match(h.notes.at(-1) ?? "", note);
+    });
+}
+
+test("start does not change the restored state it receives", async () => {
+    const restored: PlanModeData = { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS };
+    const h = startHarness({ data: restored });
+    await h.controller.command("bst", h.ctx);
+    assert.deepEqual(restored, { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS });
+});
+
+test("/plan impl accepts the stored proposal without the review dialog", async () => {
+    const h = startHarness({ data: { phase: "brainstorming", proposal: PROPOSAL, savedTools: FULL_TOOLS } });
+    await h.controller.command("impl", h.ctx);
+    assert.equal(h.status, "plan: implementing");
+    assert.deepEqual(h.activeTools, [...FULL_TOOLS, "plan_complete"]);
+    assert.deepEqual(h.displays, []);
+    assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
+});
+
+test("/plan impl after /plan bst resumes the kept proposal and stops waiting for feedback", async () => {
+    const h = startHarness({ data: IMPLEMENTING });
+    await h.controller.command("bst", h.ctx);
+    await h.controller.command("impl", h.ctx);
+    assert.equal(h.status, "plan: implementing");
+    assert.equal(h.persisted.at(-1)?.waitingForUserFeedback, undefined);
+});
+
+const IMPL_ELSEWHERE: Array<{ name: string; data: PlanModeData; note: RegExp }> = [
+    {
+        name: "brainstorming without a proposal",
+        data: { phase: "brainstorming", savedTools: FULL_TOOLS },
+        note: /no stored proposal/i,
+    },
+    { name: "implementing", data: IMPLEMENTING, note: /works only while brainstorming/i },
+    { name: "off", data: { phase: "off", savedTools: FULL_TOOLS }, note: /run \/plan to start/i },
+];
+
+for (const { name, data, note } of IMPL_ELSEWHERE) {
+    test(`/plan impl while ${name} changes nothing and explains why`, async () => {
+        const h = startHarness({ data });
+        const before = h.persisted.length;
+        await h.controller.command("impl", h.ctx);
+        assert.equal(h.persisted.length, before);
+        assert.match(h.notes.at(-1) ?? "", note);
+    });
+}
+
+const VAGUE_PROPOSALS: Array<{ name: string; proposal: PlanProposal; error: RegExp }> = [
+    {
+        name: "a description that is too short",
+        proposal: { ...PROPOSAL, description: "ok" },
+        error: /description is empty or overly short/i,
+    },
+    {
+        name: "a change path that is too short",
+        proposal: { ...PROPOSAL, changes: [{ path: "x", change: "Rename the command" }] },
+        error: /meaningful path and description/i,
+    },
+    {
+        name: "a change text that is too short",
+        proposal: { ...PROPOSAL, changes: [{ path: "src/index.ts", change: "ok" }] },
+        error: /meaningful path and description/i,
+    },
+    {
+        name: "a test text that is too short",
+        proposal: { ...PROPOSAL, tests: [{ path: "src/plan.test.ts", test: "ok" }] },
+        error: /meaningful path and behavior/i,
+    },
+    { name: "placeholder text", proposal: { ...PROPOSAL, description: "TBD" }, error: /placeholder/i },
+];
+
+for (const { name, proposal, error } of VAGUE_PROPOSALS) {
+    test(`propose rejects ${name} and stores nothing`, async () => {
+        const h = startHarness();
+        await assert.rejects(h.controller.propose(proposal, h.ctx), error);
+        assert.equal(h.persisted.at(-1)?.proposal, undefined);
+    });
+}
+
+test("an unknown /plan subcommand changes nothing and names the subcommand", async () => {
+    const h = startHarness();
+    const before = h.persisted.length;
+    await h.controller.command("nope", h.ctx);
+    assert.equal(h.persisted.length, before);
+    assert.match(h.notes.at(-1) ?? "", /unknown subcommand "nope"/);
+});
+
+test("/plan while plan mode is on changes nothing and names the phase", async () => {
+    const h = startHarness();
+    const before = h.persisted.length;
+    await h.controller.command(undefined, h.ctx);
+    assert.equal(h.persisted.length, before);
+    assert.match(h.notes.at(-1) ?? "", /already on \(brainstorming\)/);
+});
+
+const THINKING_MODELS = { brainstorming: "p/plan", thinking: "p/think", implementing: "p/build" };
+
+test("/plan thk toggles the thinking model during brainstorming", async () => {
+    const h = startHarness({ model: "p/user", models: THINKING_MODELS });
+    await h.ready;
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/think");
+    assert.equal(h.status, "plan: thinking");
+    assert.equal(h.persisted.at(-1)?.thinking, true);
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/plan");
+    assert.equal(h.status, "plan: brainstorming");
+    assert.equal(h.persisted.at(-1)?.thinking, undefined);
+});
+
+test("thinking keeps the brainstorming tools and deny list", async () => {
+    const h = startHarness({ tools: ALL_TOOLS, models: THINKING_MODELS, deniedTools: ["mcp__browser__click"] });
+    const before = [...h.activeTools];
+    await h.controller.command("thk", h.ctx);
+    assert.deepEqual(h.activeTools, before);
+    assert.match(h.controller.blockReason("edit") ?? "", /not available/i);
+    assert.match(h.controller.blockReason("mcp__browser__click") ?? "", /not available/i);
+});
+
+test("/plan thk without a thinking model warns and changes nothing", async () => {
+    const h = startHarness({ model: "p/user", models: { brainstorming: "p/plan" } });
+    await h.ready;
+    const before = h.persisted.length;
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.persisted.length, before);
+    assert.equal(h.model, "p/plan");
+    assert.match(h.notes.at(-1) ?? "", /modes\.thinking\.model/);
+});
+
+test("/plan thk works only while brainstorming", async () => {
+    const h = startHarness({ models: THINKING_MODELS, data: IMPLEMENTING });
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.status, "plan: implementing");
+    assert.match(h.notes.at(-1) ?? "", /works only while brainstorming/);
+});
+
+test("accepting while thinking implements on the implementing model and ends thinking", async () => {
+    const h = startHarness({ model: "p/user", models: THINKING_MODELS, choices: ["Accept and implement"] });
+    await h.ready;
+    await h.controller.command("thk", h.ctx);
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.model, "p/build");
+    assert.equal(h.persisted.at(-1)?.thinking, undefined);
+    await h.controller.complete(h.ctx);
+    assert.equal(h.model, "p/plan");
+    assert.equal(h.status, "plan: brainstorming");
+});
+
+test("turning thinking off without a brainstorming model returns to the user's model", async () => {
+    const h = startHarness({ model: "p/user", models: { thinking: "p/think" } });
+    await h.ready;
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/think");
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/user");
+});
+
+test("a restored or resumed thinking state uses the thinking model", async () => {
+    const h = startHarness({
+        model: "p/user",
+        models: THINKING_MODELS,
+        data: { phase: "brainstorming", savedTools: FULL_TOOLS, thinking: true },
+    });
+    await h.ready;
+    assert.equal(h.model, "p/think");
+    assert.equal(h.status, "plan: thinking");
+    await h.controller.resume(h.ctx, { phase: "brainstorming", savedTools: [] });
+    assert.equal(h.model, "p/plan");
+    await h.controller.resume(h.ctx, { phase: "brainstorming", savedTools: [], thinking: true });
+    assert.equal(h.model, "p/think");
 });

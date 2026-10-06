@@ -1,18 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     createAgentSession,
+    createCodemodeExtension,
     DefaultResourceLoader,
     SessionManager,
+    SettingsManager,
     type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import planMode, { type PlanModeOptions } from "./index.ts";
-import type { PlanProposal } from "./state.ts";
+import planMode from "./index.ts";
+import type { PlanProposal } from "./proposal.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
@@ -21,7 +23,7 @@ const PROPOSAL: PlanProposal = {
         {
             path: "src/index.ts",
             change: "Simplify orchestration and remove duplicate actions",
-            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+            example: '"deniedTools": ["mcp__browser__*"]',
         },
     ],
     tests: [
@@ -32,8 +34,17 @@ const PROPOSAL: PlanProposal = {
     ],
 };
 
+interface SessionSetup {
+    /** Contents of plan.json in the scratch agent directory. */
+    plan?: unknown;
+    /** Loads and activates the codemode tool. */
+    codemode?: boolean;
+    /** Extra extensions loaded before the session starts, as MCP servers are. */
+    extensions?: Array<(pi: ExtensionAPI) => void>;
+}
+
 /** Builds a real pi agent session wired to a scripted (network-free) fake model. */
-async function createFakeModelSession(sessionManager: SessionManager, options: PlanModeOptions = {}) {
+async function createFakeModelSession(sessionManager: SessionManager, setup: SessionSetup = {}) {
     const faux = fauxProvider();
     let hostApi!: ExtensionAPI;
     const fauxProviderExtension = (pi: ExtensionAPI): void => {
@@ -41,16 +52,28 @@ async function createFakeModelSession(sessionManager: SessionManager, options: P
         pi.registerProvider(faux.provider);
     };
 
-    // Use a scratch agent dir, not getAgentDir(), so the test only loads the local extension under
-    // test and never a real globally-installed copy of this same package.
+    // Use a scratch agent dir for everything, so the test never loads a globally installed copy of
+    // this package, the user's settings, or the user's plan.json.
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-"));
+    if (setup.plan !== undefined) writeFileSync(join(agentDir, "plan.json"), JSON.stringify(setup.plan));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const settingsManager = SettingsManager.inMemory(setup.codemode ? { defaultTools: ["+codemode"] } : {});
     const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
-        agentDir: mkdtempSync(join(tmpdir(), "pi-plan-mode-e2e-")),
-        extensionFactories: [(pi) => planMode(pi, options), fauxProviderExtension],
+        agentDir,
+        settingsManager,
+        extensionFactories: [
+            (pi) => planMode(pi),
+            fauxProviderExtension,
+            ...(setup.codemode ? [createCodemodeExtension()] : []),
+            ...(setup.extensions ?? []),
+        ],
     });
     await resourceLoader.reload();
 
     const { session } = await createAgentSession({
+        agentDir,
+        settingsManager,
         resourceLoader,
         sessionManager,
         model: faux.getModel(),
@@ -84,7 +107,6 @@ test("brainstorming: a real agent turn calling plan_propose surfaces the formatt
     const transcript = JSON.stringify(sessionManager.getEntries());
     assert.match(transcript, /## Description/);
     assert.match(transcript, /Simplify the proposal flow/);
-    assert.match(transcript, /mcp__browser__/);
     assert.match(transcript, /## Tests/);
     assert.match(transcript, /Registers the plan control tools/);
 
@@ -140,10 +162,10 @@ test(
     },
 );
 
-test("brainstorming: tools that connect after startup reach the model only when allowed", async () => {
+test("brainstorming: tools that connect after startup reach the model unless denied", async () => {
     const sessionManager = SessionManager.inMemory();
     const { session, faux, pi } = await createFakeModelSession(sessionManager, {
-        allowedTools: ["mcp__demo__read_page"],
+        plan: { modes: { brainstorming: { deniedTools: ["mcp__demo__delete_all"] } } },
     });
     for (const name of ["mcp__demo__read_page", "mcp__demo__delete_all"]) {
         pi.registerTool({
@@ -175,6 +197,51 @@ test("brainstorming: tools that connect after startup reach the model only when 
         "plan_propose",
         "read",
     ]);
+    session.dispose();
+});
+
+test("brainstorming: a codemode script can call allowed tools but not denied ones", async () => {
+    const executed: string[] = [];
+    const demoServer = (pi: ExtensionAPI): void => {
+        for (const name of ["mcp__demo__read_page", "mcp__demo__delete_all"]) {
+            pi.registerTool({
+                name,
+                label: name,
+                description: name,
+                exposure: "codemode",
+                parameters: Type.Object({}),
+                async execute() {
+                    executed.push(name);
+                    return { content: [{ type: "text" as const, text: "ok" }], details: {} };
+                },
+            });
+        }
+    };
+    const sessionManager = SessionManager.inMemory();
+    const { session, faux } = await createFakeModelSession(sessionManager, {
+        plan: { modes: { brainstorming: { deniedTools: ["mcp__demo__delete_all"] } } },
+        codemode: true,
+        extensions: [demoServer],
+    });
+    const script = [
+        "const results = await Promise.allSettled([",
+        "    tools.mcp__demo__read_page({}),",
+        "    tools.mcp__demo__delete_all({}),",
+        "]);",
+        'return results.map((result) => (result.status === "fulfilled" ? "ok" : result.reason.message));',
+    ].join("\n");
+    faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("codemode", { code: script })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("Inspected.", { stopReason: "stop" }),
+    ]);
+
+    await session.prompt("Inspect the demo.");
+
+    assert.deepEqual(executed, ["mcp__demo__read_page"]);
+    assert.match(
+        JSON.stringify(sessionManager.getEntries()),
+        /mcp__demo__delete_all.{0,40}not available during brainstorming/,
+    );
     session.dispose();
 });
 

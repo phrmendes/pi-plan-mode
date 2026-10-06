@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizePlanModeData, type PlanProposal } from "./state.ts";
+import type { PlanProposal } from "./proposal.ts";
+import { normalizePlanModeData } from "./state.ts";
 
 const PROPOSAL: PlanProposal = {
     description: "Agents should submit one short proposal that the user can accept.",
@@ -8,7 +9,7 @@ const PROPOSAL: PlanProposal = {
         {
             path: "src/index.ts",
             change: "Simplify proposal orchestration and remove duplicate steps",
-            example: 'planMode(pi, { allowedTools: ["mcp__browser__*"] })',
+            example: '"deniedTools": ["mcp__browser__*"]',
         },
     ],
 };
@@ -133,3 +134,35 @@ test("keeps rejection feedback only in brainstorming", () => {
         undefined,
     );
 });
+
+const SAVED_MODELS: Array<{ name: string; data: Record<string, unknown>; expected: string | undefined }> = [
+    { name: "keeps it while plan mode is on", data: { phase: "brainstorming", savedModel: " a/b " }, expected: "a/b" },
+    { name: "drops it while plan mode is off", data: { phase: "off", savedModel: "a/b" }, expected: undefined },
+    { name: "drops a value that is not text", data: { phase: "brainstorming", savedModel: 42 }, expected: undefined },
+];
+
+for (const { name, data, expected } of SAVED_MODELS) {
+    test(`saved model: ${name}`, () => {
+        const normalized = normalizePlanModeData(data, ["read"]);
+        assert.equal(normalized.savedModel, expected);
+        assert.equal("savedModel" in normalized, expected !== undefined);
+    });
+}
+
+const THINKING_FLAGS: Array<{ name: string; data: Record<string, unknown>; expected: boolean | undefined }> = [
+    { name: "keeps it while brainstorming", data: { phase: "brainstorming", thinking: true }, expected: true },
+    {
+        name: "drops it while implementing",
+        data: { phase: "implementing", proposal: PROPOSAL, thinking: true },
+        expected: undefined,
+    },
+    { name: "drops a value that is not true", data: { phase: "brainstorming", thinking: "yes" }, expected: undefined },
+];
+
+for (const { name, data, expected } of THINKING_FLAGS) {
+    test(`thinking flag: ${name}`, () => {
+        const normalized = normalizePlanModeData(data, ["read"]);
+        assert.equal(normalized.thinking, expected);
+        assert.equal("thinking" in normalized, expected !== undefined);
+    });
+}
