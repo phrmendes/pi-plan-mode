@@ -39,7 +39,7 @@
         "prettier": "^3.9.6",
         "typescript": "latest"
     },
-    "packageManager": "pnpm@11.17.0",
+    "packageManager": "pnpm@12.3.4",
     "pi": {
         "extensions": [
             "./src/index.ts"
