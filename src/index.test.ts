@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import planMode from "./index.ts";
 import { PROPOSAL_ENTRY, type PlanProposal } from "./proposal.ts";
-import type { PlanModeData } from "./state.ts";
+import type { PlanModeData, ThinkingLevel } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
@@ -54,6 +54,8 @@ interface HarnessOptions {
     model?: ModelRef;
     registry?: ModelRef[];
     agentDir?: string;
+    cwd?: string;
+    trusted?: boolean;
     choices?: (string | undefined)[];
     rejectStartupActions?: boolean;
 }
@@ -78,6 +80,9 @@ function createHarness(options: HarnessOptions = {}) {
     let setActiveToolsCalls = 0;
     let started = false;
     const modelCalls: ModelRef[] = [];
+    const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-plan-mode-cwd-"));
+    const trusted = options.trusted ?? true;
+    let thinkingLevel: ThinkingLevel = "medium";
 
     const pi = {
         registerCommand: (name: string, definition: unknown) => void commands.set(name, definition as never),
@@ -98,15 +103,27 @@ function createHarness(options: HarnessOptions = {}) {
             activeTools = [...names];
         },
         setModel: async (model: ModelRef) => {
+            const previous = ctx.model;
             modelCalls.push(model);
             ctx.model = model;
+            events.get("model_select")?.({ type: "model_select", model, previousModel: previous, source: "set" }, ctx);
             return true;
+        },
+        getThinkingLevel: () => thinkingLevel,
+        setThinkingLevel: (level: ThinkingLevel) => {
+            const previous = thinkingLevel;
+            thinkingLevel = level;
+            events.get("thinking_level_select")?.(
+                { type: "thinking_level_select", level, previousLevel: previous },
+                ctx,
+            );
         },
     };
 
     const ctx = {
         hasUI: true,
         model: options.model,
+        isProjectTrusted: () => trusted,
         modelRegistry: {
             find: (provider: string, id: string) =>
                 (options.registry ?? []).find((model) => model.provider === provider && model.id === id),
@@ -122,6 +139,7 @@ function createHarness(options: HarnessOptions = {}) {
             getBranch: () => options.branch ?? options.entries ?? [],
             getSessionId: () => "test-session",
             getSessionFile: () => undefined,
+            getCwd: () => cwd,
         },
     };
 
@@ -353,5 +371,75 @@ test("the plan_ask tool returns the user's answers", async () => {
     const result = (await h.tool("plan_ask", {
         questions: [{ question: "Favorite color?", options: ["Blue", "Red"] }],
     })) as { content: Array<{ text: string }> };
-    assert.match(result.content[0].text, /Q: Favorite color\?\nA: Blue/);
+    assert.match(result.content[0]?.text ?? "", /Q: Favorite color\?\nA: Blue/);
+});
+
+test("a user model change is captured as an override", () => {
+    const h = createHarness();
+    h.start();
+    h.emit("model_select", {
+        type: "model_select",
+        model: { provider: "p", id: "custom" },
+        previousModel: undefined,
+        source: "set",
+    });
+    assert.equal(h.appended.at(-1)?.overrides?.default?.brainstorming?.model, "p/custom");
+});
+
+test("a restored model change is not captured", () => {
+    const h = createHarness();
+    h.start();
+    const before = h.appended.length;
+    h.emit("model_select", {
+        type: "model_select",
+        model: { provider: "p", id: "custom" },
+        previousModel: undefined,
+        source: "restore",
+    });
+    assert.equal(h.appended.length, before);
+});
+
+test("plan mode's own model switch is not captured as an override", () => {
+    const h = createHarness({
+        plan: { modes: { brainstorming: { model: "p/plan" } } },
+        registry: [{ provider: "p", id: "plan" }],
+    });
+    h.start();
+    assert.deepEqual(h.modelCalls, [{ provider: "p", id: "plan" }]);
+    assert.equal(
+        h.appended.some((entry) => entry.overrides !== undefined),
+        false,
+    );
+});
+
+test("a thinking level change is captured as an override", () => {
+    const h = createHarness();
+    h.start();
+    h.emit("thinking_level_select", { type: "thinking_level_select", level: "max", previousLevel: "medium" });
+    assert.equal(h.appended.at(-1)?.overrides?.default?.brainstorming?.thinkingLevel, "max");
+});
+
+test("a trusted project reads .plan.json and an untrusted one ignores it", () => {
+    const project = mkdtempSync(join(tmpdir(), "pi-plan-mode-project-"));
+    writeFileSync(join(project, ".git"), "");
+    writeFileSync(
+        join(project, ".plan.json"),
+        JSON.stringify({ activeProfile: "work", profiles: { work: { brainstorming: { model: "p/local" } } } }),
+    );
+    const trustedHarness = createHarness({
+        cwd: project,
+        model: { provider: "p", id: "user" },
+        registry: [{ provider: "p", id: "local" }],
+    });
+    trustedHarness.start();
+    assert.deepEqual(trustedHarness.modelCalls, [{ provider: "p", id: "local" }]);
+
+    const untrustedHarness = createHarness({
+        cwd: project,
+        trusted: false,
+        model: { provider: "p", id: "user" },
+        registry: [{ provider: "p", id: "local" }],
+    });
+    untrustedHarness.start();
+    assert.deepEqual(untrustedHarness.modelCalls, []);
 });

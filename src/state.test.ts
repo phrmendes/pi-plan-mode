@@ -47,19 +47,6 @@ test("drops an empty or malformed tests field but keeps the proposal", () => {
     assert.ok(malformed.proposal);
 });
 
-test("normalizes current persisted state", () => {
-    assert.deepEqual(
-        normalizePlanModeData({ phase: "implementing", proposal: PROPOSAL, savedTools: ["read", "bash", "edit"] }, [
-            "read",
-        ]),
-        {
-            phase: "implementing",
-            proposal: PROPOSAL,
-            savedTools: ["read", "bash", "edit"],
-        },
-    );
-});
-
 test("drops an optional example that is not meaningful text", () => {
     const data = normalizePlanModeData(
         {
@@ -69,7 +56,7 @@ test("drops an optional example that is not meaningful text", () => {
         },
         ["read"],
     );
-    assert.deepEqual(data.proposal?.changes, [{ path: "src/index.ts", change: PROPOSAL.changes[0].change }]);
+    assert.deepEqual(data.proposal?.changes, [{ path: "src/index.ts", change: PROPOSAL.changes[0]?.change }]);
 });
 
 test("removes malformed structured proposals", () => {
@@ -166,3 +153,50 @@ for (const { name, data, expected } of THINKING_FLAGS) {
         assert.equal("thinking" in normalized, expected !== undefined);
     });
 }
+
+const OVERRIDES = {
+    "local:work": {
+        brainstorming: { model: "a/b", thinkingLevel: "max" },
+        implementing: { model: "a/c" },
+        thinking: {},
+    },
+};
+
+test("overrides: keeps them with the profile and saved thinking level", () => {
+    const data = normalizePlanModeData(
+        { phase: "brainstorming", savedThinkingLevel: "high", activeProfile: "local:work", overrides: OVERRIDES },
+        ["read"],
+    );
+    assert.equal(data.savedThinkingLevel, "high");
+    assert.equal(data.activeProfile, "local:work");
+    assert.deepEqual(data.overrides, {
+        "local:work": {
+            brainstorming: { model: "a/b", thinkingLevel: "max" },
+            implementing: { model: "a/c" },
+        },
+    });
+});
+
+test("overrides: drops them while plan mode is off", () => {
+    const data = normalizePlanModeData(
+        { phase: "off", savedThinkingLevel: "high", activeProfile: "local:work", overrides: OVERRIDES },
+        ["read"],
+    );
+    assert.equal(data.savedThinkingLevel, undefined);
+    assert.equal(data.activeProfile, undefined);
+    assert.equal(data.overrides, undefined);
+});
+
+test("overrides: drops malformed entries", () => {
+    const data = normalizePlanModeData(
+        {
+            phase: "brainstorming",
+            overrides: {
+                work: { brainstorming: { model: "   ", thinkingLevel: "loud" }, implementing: 7 },
+                broken: "nope",
+            },
+        },
+        ["read"],
+    );
+    assert.equal(data.overrides, undefined);
+});

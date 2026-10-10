@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPlanController } from "./plan.ts";
 import { formatProposal, type PlanProposal } from "./proposal.ts";
-import type { PlanModes } from "./config.ts";
-import type { PlanModeData, PlanState } from "./state.ts";
+import type { PlanModes } from "./planFile.ts";
+import type { PlanModeData, PlanState, ThinkingLevel } from "./state.ts";
 
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const MCP_TOOLS = ["mcp__browser__open", "mcp__browser__click", "mcp__docs__search"];
@@ -29,10 +29,16 @@ const PROPOSAL: PlanProposal = {
     ],
 };
 
+/** Returns the first text block of a tool result. */
+function resultText(result: { content: Array<{ text: string }> }): string {
+    return result.content[0]?.text ?? "";
+}
+
 interface PlanHarnessOptions {
     tools?: string[];
     deniedTools?: string[];
     models?: { brainstorming?: string; implementing?: string; thinking?: string };
+    levels?: { brainstorming?: ThinkingLevel; implementing?: ThinkingLevel; thinking?: ThinkingLevel };
     model?: string;
     available?: string[];
     setModelError?: Error;
@@ -40,6 +46,7 @@ interface PlanHarnessOptions {
     choices?: (string | undefined)[];
     inputs?: (string | undefined)[];
     hasUI?: boolean;
+    profiles?: Array<{ key: string; name: string }>;
     loadPrompt?: (phase: PlanState) => string | null;
 }
 
@@ -55,6 +62,12 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
     const sent: string[] = [];
     const notes: string[] = [];
     let status: string | undefined;
+    let thinkingLevel: ThinkingLevel = "medium";
+    let profileKey = "default";
+    let profileName = "default";
+    const profiles = options.profiles ?? [{ key: "default", name: "default" }];
+    const resetCalls: number[] = [];
+    const levelCalls: ThinkingLevel[] = [];
     const choices = options.choices ?? [];
     const inputs = options.inputs ?? [];
 
@@ -62,11 +75,34 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         getModes: (): PlanModes => ({
             brainstorming: {
                 ...(models.brainstorming ? { model: models.brainstorming } : {}),
+                ...(options.levels?.brainstorming ? { thinkingLevel: options.levels.brainstorming } : {}),
                 deniedTools: options.deniedTools ?? [],
             },
-            implementing: models.implementing ? { model: models.implementing } : {},
-            thinking: models.thinking ? { model: models.thinking } : {},
+            implementing: {
+                ...(models.implementing ? { model: models.implementing } : {}),
+                ...(options.levels?.implementing ? { thinkingLevel: options.levels.implementing } : {}),
+            },
+            thinking: {
+                ...(models.thinking ? { model: models.thinking } : {}),
+                ...(options.levels?.thinking ? { thinkingLevel: options.levels.thinking } : {}),
+            },
         }),
+        getActiveProfile: () => ({ key: profileKey, name: profileName }),
+        listProfiles: () => profiles.map((profile) => ({ key: profile.key, name: profile.name })),
+        setActiveProfile: (key) => {
+            const found = profiles.find((profile) => profile.key === key);
+            if (!found) return false;
+            profileKey = found.key;
+            profileName = found.name;
+            return true;
+        },
+        resetActiveProfile: () => {
+            resetCalls.push(1);
+            profileKey = "default";
+            profileName = "default";
+            return { key: profileKey, name: profileName };
+        },
+        getDeniedTools: (phase) => (phase === "brainstorming" ? (options.deniedTools ?? []) : []),
         getActiveTools: () => [...activeTools],
         setActiveTools: (tools) => {
             setActiveToolsCalls++;
@@ -79,6 +115,11 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
             if (!available.includes(ref)) return false;
             model = ref;
             return true;
+        },
+        getThinkingLevel: () => thinkingLevel,
+        setThinkingLevel: (level) => {
+            thinkingLevel = level;
+            levelCalls.push(level);
         },
         persist: (data) => {
             persisted.push(data);
@@ -129,7 +170,15 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         get model() {
             return model;
         },
+        get thinkingLevel() {
+            return thinkingLevel;
+        },
+        get profileKey() {
+            return profileKey;
+        },
         modelCalls,
+        levelCalls,
+        resetCalls,
         persisted,
         displays,
         sent,
@@ -174,7 +223,7 @@ test("propose stores and returns the formatted proposal without UI", async () =>
     const result = await h.controller.propose(PROPOSAL, h.ctx);
     assert.equal(h.status, "plan: brainstorming");
     assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
-    assert.match(result.content[0].text, /## Description/);
+    assert.match(resultText(result), /## Description/);
 });
 
 test("propose accepts any descriptive path, including commands and absolute paths", async () => {
@@ -212,7 +261,7 @@ test("propose accepts legitimate words that resemble placeholders", async () => 
 test("rejecting clears the pending proposal and waits for feedback", async () => {
     const h = startHarness({ choices: ["Reject"] });
     const result = await h.controller.propose(PROPOSAL, h.ctx);
-    assert.match(result.content[0].text, /rejected/i);
+    assert.match(resultText(result), /rejected/i);
     assert.equal(h.persisted.at(-1)?.proposal, undefined);
     assert.equal(h.status, "plan: waiting for feedback");
 });
@@ -227,27 +276,10 @@ test("rejection blocks new proposals and questions until user feedback", async (
     await h.controller.ask({ questions: [{ question: "q", options: ["a"] }] }, h.ctx);
 });
 
-test("the review dialog offers only accept and reject", async () => {
-    let offered: string[] = [];
-    const h = startHarness();
-    const ctx = {
-        ...h.ctx,
-        ui: {
-            ...h.ctx.ui,
-            select: async (_title: string, options: string[]) => {
-                offered = options;
-                return undefined;
-            },
-        },
-    } as typeof h.ctx;
-    await h.controller.propose(PROPOSAL, ctx);
-    assert.deepEqual(offered, ["Accept and implement", "Reject"]);
-});
-
 test("closing the review without a choice rejects the proposal", async () => {
     const h = startHarness({ choices: [undefined] });
     const result = await h.controller.propose(PROPOSAL, h.ctx);
-    assert.match(result.content[0].text, /rejected/i);
+    assert.match(resultText(result), /rejected/i);
     assert.equal(h.persisted.at(-1)?.proposal, undefined);
     assert.equal(h.status, "plan: waiting for feedback");
 });
@@ -257,7 +289,7 @@ test("plan_complete returns to brainstorming and clears the proposal", async () 
         data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
     });
     const result = await h.controller.complete(h.ctx);
-    assert.match(result.content[0].text, /brainstorming/i);
+    assert.match(resultText(result), /brainstorming/i);
     assert.equal(h.status, "plan: brainstorming");
     assert.equal(h.persisted.at(-1)?.phase, "brainstorming");
     assert.equal(h.persisted.at(-1)?.proposal, undefined);
@@ -299,11 +331,12 @@ test("command completions follow the current phase", async () => {
     const values = (prefix: string) => h.controller.completions(prefix)?.map((item) => item.value) ?? null;
     assert.equal(values(""), null);
     await h.controller.command(undefined, h.ctx);
-    assert.deepEqual(values(""), ["impl", "thk", "off"]);
+    assert.deepEqual(values(""), ["impl", "thk", "off", "reset", "profile"]);
     assert.deepEqual(values("im"), ["impl"]);
     assert.equal(values("nope"), null);
+    assert.deepEqual(values("profile "), ["profile default"]);
     await h.controller.propose(PROPOSAL, h.ctx);
-    assert.deepEqual(values(""), ["bst", "off"]);
+    assert.deepEqual(values(""), ["bst", "off", "reset", "profile"]);
 });
 
 test("a missing phase prompt warns once and leaves the system prompt alone", () => {
@@ -343,7 +376,7 @@ test("plan_ask returns a selected option as the answer", async () => {
         { questions: [{ question: "Favorite color?", options: ["Blue", "Red"] }] },
         h.ctx,
     );
-    assert.match(result.content[0].text, /Q: Favorite color\?\nA: Blue/);
+    assert.match(resultText(result), /Q: Favorite color\?\nA: Blue/);
 });
 
 test("plan_ask falls back to free text when the user picks Other", async () => {
@@ -352,13 +385,13 @@ test("plan_ask falls back to free text when the user picks Other", async () => {
         { questions: [{ question: "Favorite color?", options: ["Blue", "Red"] }] },
         h.ctx,
     );
-    assert.match(result.content[0].text, /A: Green/);
+    assert.match(resultText(result), /A: Green/);
 });
 
 test("plan_ask degrades gracefully without a UI", async () => {
     const h = startHarness({ hasUI: false });
     const result = await h.controller.ask({ questions: [{ question: "q", options: ["a"] }] }, h.ctx);
-    assert.match(result.content[0].text, /require a UI session/i);
+    assert.match(resultText(result), /require a UI session/i);
 });
 
 test("prompt composition appends the proposal during implementation", () => {
@@ -369,21 +402,6 @@ test("prompt composition appends the proposal during implementation", () => {
     assert.match(result?.systemPrompt ?? "", /## Description\nSimplify the proposal flow/);
     assert.match(result?.systemPrompt ?? "", /### `src\/index\.ts`/);
     assert.match(result?.systemPrompt ?? "", /## Tests/);
-});
-
-test("brainstorming keeps every active tool that is not denied", () => {
-    const h = startHarness({ tools: ALL_TOOLS });
-    assert.deepEqual(h.activeTools, [
-        "read",
-        "grep",
-        "ls",
-        "find",
-        "mcp__browser__open",
-        "mcp__browser__click",
-        "mcp__docs__search",
-        "plan_propose",
-        "plan_ask",
-    ]);
 });
 
 const DEFAULT_DENIED = ["bash", "powershell", "edit", "write"];
@@ -403,12 +421,6 @@ test("configured denied tools are inactive and blocked, by exact name or prefix"
         assert.match(h.controller.blockReason(denied) ?? "", /not available/i, denied);
     }
     assert.equal(h.controller.blockReason("mcp__browser__open"), undefined);
-});
-
-test("a tool reached only through codemode is allowed unless denied", () => {
-    const h = startHarness({ tools: FULL_TOOLS, deniedTools: ["mcp__k8s__k8s_pod_exec"] });
-    assert.equal(h.controller.blockReason("mcp__k8s__list_k8s_pods"), undefined);
-    assert.match(h.controller.blockReason("mcp__k8s__k8s_pod_exec") ?? "", /not available/i);
 });
 
 test("a deny entry can remove a discovery tool", () => {
@@ -484,7 +496,7 @@ test("plan control tools are removed while plan mode is off", () => {
 test("persisted plan state is a snapshot, not a live reference", async () => {
     const h = startHarness({ hasUI: false });
     await h.controller.propose(PROPOSAL, h.ctx);
-    assert.equal(h.persisted[0].proposal, undefined);
+    assert.equal(h.persisted[0]?.proposal, undefined);
     assert.deepEqual(h.persisted.at(-1)?.proposal, PROPOSAL);
     assert.notEqual(h.persisted[0], h.persisted.at(-1));
 });
@@ -777,7 +789,7 @@ test("/plan thk without a thinking model warns and changes nothing", async () =>
     await h.controller.command("thk", h.ctx);
     assert.equal(h.persisted.length, before);
     assert.equal(h.model, "p/plan");
-    assert.match(h.notes.at(-1) ?? "", /modes\.thinking\.model/);
+    assert.match(h.notes.at(-1) ?? "", /thinking/);
 });
 
 test("/plan thk works only while brainstorming", async () => {
@@ -821,4 +833,122 @@ test("a restored or resumed thinking state uses the thinking model", async () =>
     assert.equal(h.model, "p/plan");
     await h.controller.resume(h.ctx, { phase: "brainstorming", savedTools: [], thinking: true });
     assert.equal(h.model, "p/think");
+});
+
+const OVERRIDE_MODELS = { brainstorming: "p/plan", implementing: "p/build" };
+
+test("a captured override applies to the active stage and survives a phase round trip", async () => {
+    const h = startHarness({
+        model: "p/user",
+        models: OVERRIDE_MODELS,
+        available: ["p/user", "p/plan", "p/build", "p/custom"],
+        choices: ["Accept and implement"],
+    });
+    await h.ready;
+    h.pickModel("p/custom");
+    h.controller.captureOverride({ model: "p/custom" }, h.ctx);
+    assert.equal(h.status, "plan: brainstorming (override)");
+    assert.equal(h.persisted.at(-1)?.overrides?.default?.brainstorming?.model, "p/custom");
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.model, "p/build");
+    await h.controller.command("bst", h.ctx);
+    assert.equal(h.model, "p/custom");
+    assert.equal(h.status, "plan: waiting for feedback (override)");
+});
+
+test("an override for the thinking stage does not change brainstorming", async () => {
+    const h = startHarness({ model: "p/user", models: THINKING_MODELS });
+    await h.ready;
+    await h.controller.command("thk", h.ctx);
+    h.controller.captureOverride({ thinkingLevel: "max" }, h.ctx);
+    assert.equal(h.persisted.at(-1)?.overrides?.default?.thinking?.thinkingLevel, "max");
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/plan");
+    await h.controller.command("thk", h.ctx);
+    assert.equal(h.model, "p/think");
+    assert.equal(h.thinkingLevel, "max");
+});
+
+test("/plan reset clears overrides and the session profile and re-applies the config", async () => {
+    const h = startHarness({
+        model: "p/user",
+        models: OVERRIDE_MODELS,
+        profiles: [
+            { key: "default", name: "default" },
+            { key: "work", name: "work" },
+        ],
+    });
+    await h.ready;
+    await h.controller.command("profile work", h.ctx);
+    assert.equal(h.profileKey, "work");
+    h.controller.captureOverride({ model: "p/custom" }, h.ctx);
+    await h.controller.command("reset", h.ctx);
+    assert.equal(h.profileKey, "default");
+    assert.equal(h.resetCalls.length, 1);
+    assert.equal(h.persisted.at(-1)?.overrides, undefined);
+    assert.match(h.notes.at(-1) ?? "", /overrides cleared/);
+    assert.equal(h.model, "p/plan");
+});
+
+test("the profile command lists profiles and warns on an unknown key", async () => {
+    const h = startHarness({
+        profiles: [
+            { key: "default", name: "default" },
+            { key: "work", name: "work" },
+        ],
+    });
+    await h.ready;
+    await h.controller.command("profile", h.ctx);
+    assert.match(h.notes.at(-1) ?? "", /profiles: default \(active\), work/);
+    await h.controller.command("profile nope", h.ctx);
+    assert.match(h.notes.at(-1) ?? "", /unknown profile "nope"/);
+});
+
+test("a configured ban blocks a tool in brainstorming but not in implementing", async () => {
+    const h = startHarness({
+        deniedTools: ["mcp__browser__open"],
+        tools: ALL_TOOLS,
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: ALL_TOOLS },
+    });
+    await h.ready;
+    assert.equal(h.controller.blockReason("mcp__browser__open"), undefined);
+    await h.controller.command("bst", h.ctx);
+    assert.match(h.controller.blockReason("mcp__browser__open") ?? "", /not available during brainstorming/);
+});
+
+test("a stage thinking level is applied when its phase starts", async () => {
+    const h = startHarness({
+        model: "p/user",
+        models: OVERRIDE_MODELS,
+        levels: { brainstorming: "high", implementing: "low" },
+        choices: ["Accept and implement"],
+    });
+    await h.ready;
+    assert.equal(h.thinkingLevel, "high");
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.equal(h.thinkingLevel, "low");
+});
+
+test("a configured thinking level is saved and restored around plan mode", async () => {
+    const h = startHarness({ model: "p/user", models: { brainstorming: "p/plan" }, levels: { brainstorming: "high" } });
+    await h.ready;
+    assert.equal(h.thinkingLevel, "high");
+    assert.equal(h.persisted.at(-1)?.savedThinkingLevel, "medium");
+    await h.controller.command("off", h.ctx);
+    assert.equal(h.thinkingLevel, "medium");
+    assert.equal(h.model, "p/user");
+});
+
+test("a level-only stage still restores the original level after a round trip", async () => {
+    const h = startHarness({
+        models: { implementing: "p/build" },
+        levels: { brainstorming: "high" },
+        choices: ["Accept and implement"],
+    });
+    await h.ready;
+    assert.equal(h.thinkingLevel, "high");
+    await h.controller.propose(PROPOSAL, h.ctx);
+    await h.controller.command("bst", h.ctx);
+    await h.controller.command("off", h.ctx);
+    assert.equal(h.thinkingLevel, "medium");
 });

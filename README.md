@@ -39,13 +39,15 @@ The plan phase follows the session tree: navigating to another branch restores t
 
 ## Commands
 
-| State         | Command      | Result                                                                                                                       |
-| ------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| Off           | `/plan`      | Enter brainstorming.                                                                                                         |
-| Brainstorming | `/plan thk`  | Toggle the thinking model on or off. Tools and the deny list stay the same.                                                  |
-| Brainstorming | `/plan impl` | Accept the stored proposal and start implementing, without the review dialog.                                                |
-| Implementing  | `/plan bst`  | Stop implementing and return to brainstorming. The proposal is kept for `/plan impl`, and the agent waits for your feedback. |
-| Enabled       | `/plan off`  | Exit plan mode and restore the original tools; this is the only way to turn it off.                                          |
+| State         | Command                | Result                                                                                                                       |
+| ------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Off           | `/plan`                | Enter brainstorming.                                                                                                         |
+| Brainstorming | `/plan thk`            | Toggle the thinking model on or off. Tools and the deny list stay the same.                                                  |
+| Brainstorming | `/plan impl`           | Accept the stored proposal and start implementing, without the review dialog.                                                |
+| Implementing  | `/plan bst`            | Stop implementing and return to brainstorming. The proposal is kept for `/plan impl`, and the agent waits for your feedback. |
+| Enabled       | `/plan off`            | Exit plan mode and restore the original tools; this is the only way to turn it off.                                          |
+| Enabled       | `/plan profile [name]` | List the profiles, or switch the active profile for this session.                                                            |
+| Enabled       | `/plan reset`          | Clear model overrides and the session's profile selection and return to the configuration.                                   |
 
 ## Permissions
 
@@ -60,43 +62,84 @@ After acceptance, the saved tools are restored together with `plan_complete`. Wh
 
 ## Configuration
 
-Plan mode reads `~/.pi/agent/plan.json` (the pi agent folder, where `mcp.json` lives):
+Plan mode reads two declarative, read-only files:
+
+- `~/.pi/agent/plan.json` (the pi agent folder, where `mcp.json` lives) is the global configuration.
+- `.plan.json`, found from the session directory up to the git root, is an optional project override that is read only in a trusted project.
+
+Each file defines profiles. A profile sets a model and thinking level per stage:
 
 ```json
 {
-    "modes": {
-        "brainstorming": {
-            "model": "openai/gpt-5-mini",
-            "deniedTools": ["mcp__agent_browser__agent_browser_click", "mcp__k8s__*"]
+    "activeProfile": "default",
+    "deniedTools": ["mcp__atlassian__executeDestructive"],
+    "profiles": {
+        "work": {
+            "match": ["/mnt/external/work/**"],
+            "deniedTools": ["mcp__k8s__k8s_pod_exec", "mcp__atlassian__*"],
+            "brainstorming": {
+                "model": "bifrost-anthropic/claude-sonnet-5-5",
+                "thinkingLevel": "medium",
+                "deniedTools": ["task"]
+            },
+            "thinking": { "model": "bifrost-anthropic/claude-opus-5-5", "thinkingLevel": "high" },
+            "implementing": { "model": "bifrost-anthropic/claude-sonnet-5-5", "thinkingLevel": "low" }
         },
-        "thinking": {
-            "model": "anthropic/claude-opus-4-1"
-        },
-        "implementing": {
-            "model": "openai/gpt-5"
+        "default": {
+            "brainstorming": { "model": "deepseek/deepseek-flash", "thinkingLevel": "high" },
+            "thinking": { "model": "deepseek/deepseek-flash", "thinkingLevel": "max" },
+            "implementing": { "model": "deepseek/deepseek-flash", "thinkingLevel": "low" }
         }
     }
 }
 ```
 
+- `activeProfile` selects the startup profile. Without it, the first profile whose `match` glob matches the session directory is used, then `default`.
+- `thinkingLevel` is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; pi clamps it to the levels the model supports.
+- A legacy top-level `modes` object is treated as `profiles.default`, so older files keep working.
+
+A local `.plan.json` extends the global profiles:
+
+```json
+{
+    "activeProfile": "work",
+    "deniedTools": ["mcp__thisproj__deploy*"],
+    "profiles": {
+        "work": {
+            "extends": "work",
+            "implementing": { "model": "bifrost-openai/Huawei/deepseek-v4-pro", "thinkingLevel": "high" }
+        },
+        "scratch": {
+            "brainstorming": { "model": "deepseek/deepseek-flash", "thinkingLevel": "minimal" }
+        }
+    }
+}
+```
+
+- A local profile with the same name as a global one extends it: named stages override field by field, unnamed stages and fields are inherited, and deny lists union. An explicit `extends` names the base.
+- Local profiles are listed and selected as `<name> (local)` and exist only in that project.
+- A name that already ends in `(local)` is rejected, and a circular `extends` chain is reported.
+
 ### Deny list
 
-- `modes.brainstorming.deniedTools` adds tools to the default deny list. You cannot remove a default.
+- The effective deny list during brainstorming is the union of the global file's `deniedTools`, the local file's `deniedTools`, the active profile's `deniedTools`, and the stage's `brainstorming.deniedTools`. The lists are additive: you cannot remove a deny.
+- Bans apply only during brainstorming. Implementing restores the saved tools untouched.
 - Entries match a tool name exactly, or as a prefix when the entry ends with `*`. A bare `*` is ignored with a warning, because it would deny every tool. The plan control tools are never denied.
 - MCP tools are named `mcp__<server>__<tool>`, with `-` in the server name written as `_`: the server `agent-browser` becomes `mcp__agent_browser__*`.
 - The deny list works for every exposure. Tools on the default `codemode` exposure are reached through `codemode` scripts, and plan mode blocks a denied one there too.
 - A deny list allows what it does not name. When you add an MCP server, deny its write tools.
 
-### Models
+### Models and overrides
 
-- `modes.<phase>.model` is `provider/id`. Plan mode splits it on the first `/`, so an id can contain a slash: `bifrost-openai/Huawei/deepseek-v4-pro`.
-- When a phase starts, plan mode switches to the model of that phase. A phase without a model uses the model you had before plan mode.
-- Plan mode saves your model before the first switch, and `/plan off` restores it.
-- `/plan thk` toggles brainstorming between its model and `modes.thinking.model`, for example a cheap model to explore and a stronger one to design. It is available only during brainstorming, keeps the same tools and deny list, and shows `plan: thinking` in the status. Thinking turns off when brainstorming ends. Without `modes.thinking.model`, `/plan thk` gives a warning and changes nothing.
-- A model you pick with `/model` stays until the next phase change.
+- `profiles.<name>.<stage>.model` is `provider/id`. Plan mode splits it on the first `/`, so an id can contain a slash: `bifrost-openai/Huawei/deepseek-v4-pro`.
+- When a phase starts, plan mode switches to the model and thinking level of that stage. A stage without a model uses the model you had before plan mode.
+- Plan mode saves your model and level before the first switch, and `/plan off` restores them.
+- `/plan thk` toggles brainstorming between its stage and the profile's `thinking` stage, for example a cheap model to explore and a stronger one to design. It is available only during brainstorming, keeps the same tools and deny list, and shows `plan: thinking` in the status. Thinking turns off when brainstorming ends. Without a thinking model, `/plan thk` gives a warning and changes nothing.
+- A model or thinking level you change with `/model` or `/thinking` while plan mode is on is remembered for the active profile and stage. Plan mode re-applies it on every phase change instead of the configured value, and the status shows `(override)`. The overrides live in the session, not on disk.
+- `/plan reset` clears every override and the session's profile selection and returns to the profile chosen by the config files.
 - An unknown model, or a model without credentials, gives a warning. The phase still changes, and the current model stays.
 
-The file is read when a session starts. Restart the session or run `/reload` after editing it. A missing or empty file means no configuration, and every bad value is reported as a warning and ignored. The old `allowedTools` key is no longer supported and is reported.
+The files are read when a session starts and on `/reload`. Nothing writes them. A missing or empty file means no configuration, and every bad value is reported as a warning and ignored. The old `allowedTools` key is no longer supported and is reported.
 
 ## Install
 

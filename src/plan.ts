@@ -1,14 +1,17 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import type { PlanModes } from "./config.ts";
+import type { PlanModes, PlanStage } from "./planFile.ts";
+import { CONTROL_TOOLS, isDenied, mergeStage, sameTools, stageKey, toolsFor } from "./policy.ts";
 import { formatProposal, requireCompleteProposal, type PlanProposal } from "./proposal.ts";
-import { normalizePlanModeData, type ActivePhase, type PlanModeData, type PlanState } from "./state.ts";
-
-export const PLAN_TOOLS = {
-    propose: "plan_propose",
-    complete: "plan_complete",
-    ask: "plan_ask",
-} as const;
+import {
+    normalizePlanModeData,
+    type ActivePhase,
+    type PlanModeData,
+    type PlanState,
+    type StageKey,
+    type StageOverride,
+    type ThinkingLevel,
+} from "./state.ts";
 
 export const PLAN_ASK_SCHEMA = Type.Object({
     questions: Type.Array(
@@ -32,14 +35,37 @@ export interface CommandCompletion {
     label: string;
 }
 
-export interface PlanControllerDeps {
+export interface PlanConfigPort {
     getModes(): PlanModes;
+    /** Returns the active profile: its stable key and display name. */
+    getActiveProfile(): { key: string; name: string };
+    /** Returns every configured profile, global and local. */
+    listProfiles(): Array<{ key: string; name: string }>;
+    /** Switches the active profile; resolves false when the key is unknown. */
+    setActiveProfile(key: string): boolean;
+    /** Reloads the config files and activates their default profile. */
+    resetActiveProfile(): { key: string; name: string };
+    /** Returns a phase's deny list: global, local, profile, and the brainstorming stage. */
+    getDeniedTools(phase: ActivePhase): string[];
+}
+
+export interface PlanToolsPort {
     getActiveTools(): string[];
     setActiveTools(tools: string[]): void;
+}
+
+export interface PlanModelPort {
     /** Returns the session model as `provider/id`, if any. */
     getModel(ctx: ExtensionContext): string | undefined;
     /** Sets the session model from `provider/id`; resolves false when the model cannot be used. */
     setModel(ref: string, ctx: ExtensionContext): Promise<boolean>;
+    /** Returns the session thinking level. */
+    getThinkingLevel(): ThinkingLevel;
+    /** Sets the session thinking level; pi clamps it to what the model supports. */
+    setThinkingLevel(level: ThinkingLevel): void;
+}
+
+export interface PlanSessionPort {
     persist(state: PlanModeData): void;
     /** Shows a formatted proposal in the session for review. */
     displayProposal(markdown: string): void;
@@ -47,9 +73,15 @@ export interface PlanControllerDeps {
     loadPrompt(phase: ActivePhase): string | null;
 }
 
+export interface PlanControllerDeps extends PlanConfigPort, PlanToolsPort, PlanModelPort, PlanSessionPort {}
+
 export interface PlanController {
     baseTools(): string[];
     blockReason(toolName: string): string | undefined;
+    /** Returns whether plan mode is applying its own model or level right now. */
+    isApplying(): boolean;
+    /** Records a user's model or level change for the active stage. */
+    captureOverride(change: StageOverride, ctx: ExtensionContext): void;
     start(ctx: ExtensionContext, restored?: PlanModeData): Promise<void>;
     resume(ctx: ExtensionContext, restored: PlanModeData): Promise<void>;
     propose(proposal: PlanProposal, ctx: ExtensionContext): Promise<PlanToolResult>;
@@ -71,6 +103,8 @@ interface Session {
     state: PlanModeData;
     planAddedTools: Set<string>;
     hasNudgedToComplete: boolean;
+    /** Counter of plan-mode model or level switches, so events they emit are not captured. */
+    applying: number;
     readonly runningTools: Set<string>;
     readonly promptFailures: Set<ActivePhase>;
 }
@@ -81,18 +115,11 @@ interface PlanCommand {
     phases: readonly ActivePhase[];
     needsProposal?: boolean;
     needsIdleTools?: boolean;
-    run(s: Session, ctx: ExtensionContext): Promise<unknown>;
+    run(s: Session, ctx: ExtensionContext, argument: string): Promise<unknown> | unknown;
 }
 
 type NoticeType = Parameters<ExtensionContext["ui"]["notify"]>[1];
 
-const CONTROL_TOOLS = new Set<string>(Object.values(PLAN_TOOLS));
-const DISCOVERY_TOOLS = ["read", "grep", "ls", "find"];
-const DEFAULT_DENIED_TOOLS = ["bash", "powershell", "edit", "write"];
-const PHASE_CONTROLS: Record<ActivePhase, string[]> = {
-    brainstorming: [PLAN_TOOLS.propose, PLAN_TOOLS.ask],
-    implementing: [PLAN_TOOLS.complete],
-};
 const PHASE_NOTICES: Record<PlanState, string> = {
     off: "off.",
     brainstorming: "brainstorming; shell, editing, and denied tools are off.",
@@ -102,30 +129,6 @@ const ASK_OTHER_OPTION = "Other (type your own)";
 const REVIEW_ACCEPT = "Accept and implement";
 const REVIEW_REJECT = "Reject";
 
-/** Returns whether a tool list names a tool, matching exact names and `*` suffixes. */
-function matchesTool(toolName: string, entries: readonly string[]): boolean {
-    return entries.some((entry) =>
-        entry.endsWith("*") ? toolName.startsWith(entry.slice(0, -1)) : toolName === entry,
-    );
-}
-
-/** Returns whether brainstorming denies a tool; the plan control tools are never denied. */
-function isDenied(toolName: string, deniedTools: readonly string[]): boolean {
-    return !CONTROL_TOOLS.has(toolName) && matchesTool(toolName, [...DEFAULT_DENIED_TOOLS, ...deniedTools]);
-}
-
-/** Returns the tools a phase activates from the saved tools. */
-function toolsFor(phase: ActivePhase, savedTools: readonly string[], deniedTools: readonly string[]): string[] {
-    if (phase === "implementing") return [...new Set([...savedTools, ...PHASE_CONTROLS.implementing])];
-    const allowed = [...DISCOVERY_TOOLS, ...savedTools].filter((tool) => !isDenied(tool, deniedTools));
-    return [...new Set([...allowed, ...PHASE_CONTROLS.brainstorming])];
-}
-
-/** Returns whether two tool lists contain the same names. */
-function sameTools(left: readonly string[], right: readonly string[]): boolean {
-    return left.length === right.length && left.every((tool) => right.includes(tool));
-}
-
 /** Builds a successful tool result with one text block. */
 function textResult(text: string): PlanToolResult {
     return { content: [{ type: "text", text }], details: {} };
@@ -134,11 +137,6 @@ function textResult(text: string): PlanToolResult {
 /** Shows a message that starts with "Plan mode:", so the user knows its source. */
 function notify(ctx: ExtensionContext, message: string, type?: NoticeType): void {
     ctx.ui.notify(`Plan mode: ${message}`, type);
-}
-
-/** Returns the deny list that the configuration adds to the defaults. */
-function configuredDeniedTools(s: Session): string[] {
-    return s.deps.getModes().brainstorming.deniedTools;
 }
 
 /** Persists a snapshot of the plan state. */
@@ -157,7 +155,9 @@ function setPlanStatus(s: Session, ctx: ExtensionContext): void {
         : s.state.thinking
           ? "thinking"
           : s.state.phase;
-    ctx.ui.setStatus("plan", `plan: ${label}`);
+    const override = overrideStage(s, currentStageKey(s));
+    const suffix = override.model || override.thinkingLevel ? " (override)" : "";
+    ctx.ui.setStatus("plan", `plan: ${label}${suffix}`);
 }
 
 /** Returns the active tools without the plan control tools. */
@@ -167,7 +167,7 @@ function baseTools(s: Session): string[] {
 
 /** Activates a phase's tools and records which of them plan mode added. */
 function applyTools(s: Session, phase: ActivePhase): void {
-    const tools = toolsFor(phase, s.state.savedTools, configuredDeniedTools(s));
+    const tools = toolsFor(phase, s.state.savedTools, s.deps.getDeniedTools(phase));
     s.planAddedTools = new Set(tools.filter((tool) => !s.state.savedTools.includes(tool)));
     s.deps.setActiveTools(tools);
 }
@@ -185,7 +185,7 @@ function syncTools(s: Session, phase: ActivePhase): void {
         s.state.savedTools = [...s.state.savedTools, ...late];
         persistState(s);
     }
-    const expected = toolsFor(phase, s.state.savedTools, configuredDeniedTools(s));
+    const expected = toolsFor(phase, s.state.savedTools, s.deps.getDeniedTools(phase));
     if (!sameTools(expected, s.deps.getActiveTools())) applyTools(s, phase);
 }
 
@@ -211,27 +211,84 @@ async function switchModel(s: Session, ctx: ExtensionContext, ref: string): Prom
     return reason === undefined;
 }
 
-/** Returns the configured model of a phase; brainstorming uses the thinking model while thinking is on. */
-function configuredModel(s: Session, phase: ActivePhase): string | undefined {
+/** Returns the stage whose model and level plan mode applies. */
+function currentStageKey(s: Session): StageKey {
+    return stageKey(s.state.phase, s.state.thinking);
+}
+
+/** Returns a stage's configured model and level from the active profile. */
+function configuredStage(s: Session, stage: StageKey): PlanStage {
     const modes = s.deps.getModes();
-    return phase === "brainstorming" && s.state.thinking ? modes.thinking.model : modes[phase].model;
+    return stage === "thinking" ? modes.thinking : modes[stage];
 }
 
-/** Switches to a phase's model, or to the saved model when the phase has none; saves the model it replaces first. */
-async function applyPhaseModel(s: Session, ctx: ExtensionContext, phase: ActivePhase): Promise<void> {
-    const configured = configuredModel(s, phase);
-    const previous = s.deps.getModel(ctx);
-    const target = configured ?? s.state.savedModel;
-    if (!target || target === previous) return;
-    const switched = await switchModel(s, ctx, target);
-    if (!switched || !configured || !previous || s.state.savedModel || s.state.phase === "off") return;
-    s.state.savedModel = previous;
+/** Returns the recorded override of a stage, if any. */
+function overrideStage(s: Session, stage: StageKey): StageOverride {
+    return s.state.overrides?.[s.deps.getActiveProfile().key]?.[stage] ?? {};
+}
+
+/** Returns the stage plan mode applies: the user's override, else the configured stage. */
+function effectiveStage(s: Session, stage: StageKey): PlanStage {
+    return mergeStage(configuredStage(s, stage), overrideStage(s, stage));
+}
+
+/** Returns whether plan mode is applying its own model or level right now. */
+function isApplying(s: Session): boolean {
+    return s.applying > 0;
+}
+
+/** Records a user's model or level change for the active stage. */
+function captureOverride(s: Session, change: StageOverride, ctx: ExtensionContext): void {
+    if (s.state.phase === "off") return;
+    const profile = s.deps.getActiveProfile().key;
+    const stage = currentStageKey(s);
+    const overrides = s.state.overrides ?? {};
+    const stages = { ...(overrides[profile] ?? {}) };
+    stages[stage] = { ...(stages[stage] ?? {}), ...change };
+    s.state.overrides = { ...overrides, [profile]: stages };
     persistState(s);
+    setPlanStatus(s, ctx);
 }
 
-/** Restores the model plan mode replaced. */
-async function restoreModel(s: Session, ctx: ExtensionContext, ref: string | undefined): Promise<void> {
-    if (ref && ref !== s.deps.getModel(ctx)) await switchModel(s, ctx, ref);
+/** Runs a plan-mode model or level change, so the events it emits are not captured as overrides. */
+async function withApplying<T>(s: Session, action: () => Promise<T> | T): Promise<T> {
+    s.applying++;
+    try {
+        return await action();
+    } finally {
+        s.applying--;
+    }
+}
+
+/** Switches to a stage's model and level, saving the pre-plan pair the first time. */
+async function applyStage(s: Session, ctx: ExtensionContext, stage: StageKey): Promise<void> {
+    const target = effectiveStage(s, stage);
+    const previousModel = s.deps.getModel(ctx);
+    const previousLevel = s.deps.getThinkingLevel();
+    const model = target.model ?? s.state.savedModel;
+    const level = target.thinkingLevel;
+    const changedModel =
+        model && model !== previousModel ? await withApplying(s, () => switchModel(s, ctx, model)) : false;
+    if (level) await withApplying(s, () => s.deps.setThinkingLevel(level));
+    const firstSwitch = s.state.savedModel === undefined && s.state.savedThinkingLevel === undefined;
+    if (firstSwitch && (changedModel || Boolean(level))) {
+        if (previousModel) s.state.savedModel = previousModel;
+        s.state.savedThinkingLevel = previousLevel;
+        persistState(s);
+    }
+}
+
+/** Restores the model and level plan mode replaced. */
+async function restoreStage(
+    s: Session,
+    ctx: ExtensionContext,
+    model: string | undefined,
+    level: ThinkingLevel | undefined,
+): Promise<void> {
+    const nextModel = model;
+    const nextLevel = level;
+    if (nextModel && nextModel !== s.deps.getModel(ctx)) await withApplying(s, () => switchModel(s, ctx, nextModel));
+    if (nextLevel) await withApplying(s, () => s.deps.setThinkingLevel(nextLevel));
 }
 
 /** Changes phase, applies its tools, and resolves once its model is applied. */
@@ -239,6 +296,7 @@ function transition(s: Session, ctx: ExtensionContext, next: PlanState): Promise
     const state = s.state;
     if (state.phase === next) return Promise.resolve();
     const savedModel = state.savedModel;
+    const savedThinkingLevel = state.savedThinkingLevel;
     if (state.phase === "off") state.savedTools = baseTools(s);
     if (next === "implementing") s.hasNudgedToComplete = false;
     if (next !== "brainstorming") {
@@ -249,6 +307,9 @@ function transition(s: Session, ctx: ExtensionContext, next: PlanState): Promise
     if (next === "off") {
         delete state.proposal;
         delete state.savedModel;
+        delete state.savedThinkingLevel;
+        delete state.activeProfile;
+        delete state.overrides;
         state.savedTools = restoreTools(s);
         s.deps.setActiveTools(state.savedTools);
     } else {
@@ -257,7 +318,7 @@ function transition(s: Session, ctx: ExtensionContext, next: PlanState): Promise
     setPlanStatus(s, ctx);
     notify(ctx, PHASE_NOTICES[next]);
     persistState(s);
-    return next === "off" ? restoreModel(s, ctx, savedModel) : applyPhaseModel(s, ctx, next);
+    return next === "off" ? restoreStage(s, ctx, savedModel, savedThinkingLevel) : applyStage(s, ctx, next);
 }
 
 /** Throws when an operation is used in the wrong phase. */
@@ -306,7 +367,11 @@ async function reviewProposal(s: Session, ctx: ExtensionContext): Promise<PlanTo
 /** Toggles brainstorming between its own model and the thinking model. */
 async function toggleThinking(s: Session, ctx: ExtensionContext): Promise<void> {
     if (!s.deps.getModes().thinking.model) {
-        notify(ctx, 'set "modes.thinking.model" in plan.json to use /plan thk.', "warning");
+        notify(
+            ctx,
+            'set a model on the "thinking" stage of the active profile in plan.json to use /plan thk.',
+            "warning",
+        );
         return;
     }
     if (s.state.thinking) delete s.state.thinking;
@@ -314,7 +379,42 @@ async function toggleThinking(s: Session, ctx: ExtensionContext): Promise<void> 
     setPlanStatus(s, ctx);
     notify(ctx, s.state.thinking ? "thinking on." : "thinking off.");
     persistState(s);
-    await applyPhaseModel(s, ctx, "brainstorming");
+    await applyStage(s, ctx, currentStageKey(s));
+}
+
+/** Clears the overrides and the session profile and returns to the config default. */
+async function resetStageState(s: Session, ctx: ExtensionContext): Promise<void> {
+    delete s.state.overrides;
+    delete s.state.activeProfile;
+    const profile = s.deps.resetActiveProfile();
+    s.state.activeProfile = profile.key;
+    persistState(s);
+    setPlanStatus(s, ctx);
+    notify(ctx, `overrides cleared; using ${profile.name}.`);
+    await applyStage(s, ctx, currentStageKey(s));
+}
+
+/** Lists the configured profiles. */
+function listProfiles(s: Session, ctx: ExtensionContext): void {
+    const active = s.deps.getActiveProfile();
+    const names = s.deps
+        .listProfiles()
+        .map((profile) => (profile.key === active.key ? `${profile.key} (active)` : profile.key));
+    notify(ctx, `profiles: ${names.join(", ")}.`);
+}
+
+/** Switches the active profile and re-applies the current stage. */
+async function switchProfile(s: Session, key: string, ctx: ExtensionContext): Promise<void> {
+    if (!s.deps.setActiveProfile(key)) {
+        notify(ctx, `unknown profile "${key}".`, "warning");
+        return;
+    }
+    const profile = s.deps.getActiveProfile();
+    s.state.activeProfile = profile.key;
+    persistState(s);
+    setPlanStatus(s, ctx);
+    notify(ctx, `using ${profile.name}.`);
+    await applyStage(s, ctx, currentStageKey(s));
 }
 
 const COMMANDS: ReadonlyMap<string, PlanCommand> = new Map<string, PlanCommand>([
@@ -356,6 +456,23 @@ const COMMANDS: ReadonlyMap<string, PlanCommand> = new Map<string, PlanCommand>(
             run: (s, ctx) => transition(s, ctx, "off"),
         },
     ],
+    [
+        "reset",
+        {
+            label: "clear model overrides and return to the config",
+            phases: ["brainstorming", "implementing"],
+            needsIdleTools: true,
+            run: resetStageState,
+        },
+    ],
+    [
+        "profile",
+        {
+            label: "list or switch the active profile",
+            phases: ["brainstorming", "implementing"],
+            run: (s, ctx, argument) => (argument ? switchProfile(s, argument, ctx) : listProfiles(s, ctx)),
+        },
+    ],
 ]);
 
 /** Returns why a command cannot run now, or undefined when it can. */
@@ -372,12 +489,13 @@ function commandProblem(s: Session, name: string, command: PlanCommand): string 
 
 /** Runs `/plan` with no argument (enter plan mode) or with a subcommand. */
 async function runCommand(s: Session, args: string | undefined, ctx: ExtensionContext): Promise<void> {
-    const name = args?.trim() ?? "";
-    if (!name) {
+    const trimmed = args?.trim() ?? "";
+    if (!trimmed) {
         if (s.state.phase === "off") await transition(s, ctx, "brainstorming");
         else notify(ctx, `already on (${s.state.phase}).`);
         return;
     }
+    const [name = "", ...rest] = trimmed.split(/\s+/);
     const command = COMMANDS.get(name);
     if (!command) {
         notify(ctx, `unknown subcommand "${name}".`, "warning");
@@ -388,13 +506,23 @@ async function runCommand(s: Session, args: string | undefined, ctx: ExtensionCo
         notify(ctx, problem, "warning");
         return;
     }
-    await command.run(s, ctx);
+    await command.run(s, ctx, rest.join(" "));
 }
 
 /** Returns the subcommands of the current phase that start with a prefix. */
 function commandCompletions(s: Session, prefix: string): CommandCompletion[] | null {
     const phase = s.state.phase;
     if (phase === "off") return null;
+    if (prefix === "profile" || prefix.startsWith("profile ")) {
+        const argument = prefix.slice("profile".length).trim();
+        const profiles = s.deps
+            .listProfiles()
+            .filter((profile) => profile.key.startsWith(argument) || profile.name.startsWith(argument))
+            .map((profile) => ({ value: `profile ${profile.key}`, label: `profile ${profile.key} — ${profile.name}` }));
+        if (prefix === "profile")
+            return [{ value: "profile", label: "profile — list or switch the profile" }, ...profiles];
+        return profiles.length > 0 ? profiles : null;
+    }
     const matches = [...COMMANDS]
         .filter(([name, command]) => command.phases.includes(phase) && name.startsWith(prefix))
         .map(([name, command]) => ({ value: name, label: `${name} — ${command.label}` }));
@@ -403,7 +531,8 @@ function commandCompletions(s: Session, prefix: string): CommandCompletion[] | n
 
 /** Returns why brainstorming blocks a tool call, or undefined to allow it. */
 function blockReason(s: Session, toolName: string): string | undefined {
-    if (s.state.phase !== "brainstorming" || !isDenied(toolName, configuredDeniedTools(s))) return undefined;
+    if (s.state.phase !== "brainstorming" || !isDenied(toolName, s.deps.getDeniedTools("brainstorming")))
+        return undefined;
     return `Plan mode: the "${toolName}" tool is not available during brainstorming.`;
 }
 
@@ -413,39 +542,47 @@ function startSession(s: Session, ctx: ExtensionContext, restored: PlanModeData 
     s.runningTools.clear();
     s.planAddedTools = new Set();
     s.hasNudgedToComplete = false;
+    s.applying = 0;
     if (!restored) {
         s.state = normalizePlanModeData(undefined, []);
+        s.state.activeProfile = s.deps.getActiveProfile().key;
         return transition(s, ctx, "brainstorming");
     }
-    s.state = { ...restored };
+    s.state = { ...restored, activeProfile: s.deps.getActiveProfile().key };
     setPlanStatus(s, ctx);
     if (s.state.phase === "off") {
         dropStrayControlTools(s);
         return Promise.resolve();
     }
     applyTools(s, s.state.phase);
-    return applyPhaseModel(s, ctx, s.state.phase);
+    return applyStage(s, ctx, currentStageKey(s));
 }
 
 /** Switches to the plan state of another session branch. */
 function resumeBranch(s: Session, ctx: ExtensionContext, restored: PlanModeData): Promise<void> {
     const previous = s.state.phase;
     const savedModel = s.state.savedModel;
+    const savedThinkingLevel = s.state.savedThinkingLevel;
     const sessionTools = previous === "off" ? baseTools(s) : restoreTools(s);
     s.runningTools.clear();
     s.hasNudgedToComplete = false;
-    s.state = { ...restored, savedTools: sessionTools };
+    s.applying = 0;
+    s.state = { ...restored, savedTools: sessionTools, activeProfile: s.deps.getActiveProfile().key };
     setPlanStatus(s, ctx);
     if (s.state.phase === "off") {
         delete s.state.savedModel;
+        delete s.state.savedThinkingLevel;
         s.planAddedTools = new Set();
         if (previous === "off") return Promise.resolve();
         s.deps.setActiveTools(sessionTools);
-        return restoreModel(s, ctx, savedModel);
+        return restoreStage(s, ctx, savedModel, savedThinkingLevel);
     }
-    if (!s.state.savedModel && savedModel) s.state.savedModel = savedModel;
+    if (!s.state.savedModel && savedModel) {
+        s.state.savedModel = savedModel;
+        s.state.savedThinkingLevel = savedThinkingLevel;
+    }
     applyTools(s, s.state.phase);
-    return applyPhaseModel(s, ctx, s.state.phase);
+    return applyStage(s, ctx, currentStageKey(s));
 }
 
 /** Stores a complete proposal and opens the review. */
@@ -538,12 +675,15 @@ export function createPlanController(deps: PlanControllerDeps): PlanController {
         state: normalizePlanModeData(undefined, []),
         planAddedTools: new Set(),
         hasNudgedToComplete: false,
+        applying: 0,
         runningTools: new Set(),
         promptFailures: new Set(),
     };
     return {
         baseTools: () => baseTools(s),
         blockReason: (toolName) => blockReason(s, toolName),
+        isApplying: () => isApplying(s),
+        captureOverride: (change, ctx) => captureOverride(s, change, ctx),
         start: (ctx, restored) => startSession(s, ctx, restored),
         resume: (ctx, restored) => resumeBranch(s, ctx, restored),
         propose: (proposal, ctx) => proposePlan(s, proposal, ctx),
