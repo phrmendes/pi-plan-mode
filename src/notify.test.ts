@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDesktopNotifier, notificationArgv, projectContext, readBranch } from "./notify.ts";
@@ -114,19 +114,19 @@ test("a disabled gate never looks up the branch", () => {
 });
 
 test("the notifier passes the project context to the command", async () => {
-    const log = mkdtempSync(join(tmpdir(), "pi-notify-log-"));
-    const stub = join(log, "notify-send");
-    const calls: Array<[string, string | undefined]> = [];
-    const lookup = async (cwd: string) => {
-        calls.push(["lookup", cwd]);
-        return "main";
-    };
+    // The spawn inherits process.env, so the stub must reach it through PATH.
+    const stubDir = mkdtempSync(join(tmpdir(), "pi-notify-stub-"));
+    const log = join(stubDir, "log");
+    const originalPath = process.env.PATH;
+    writeFileSync(join(stubDir, "notify-send"), `#!/bin/sh\nprintf "%s\\n" "$*" >> ${log}\n`);
+    chmodSync(join(stubDir, "notify-send"), 0o755);
+    process.env.PATH = `${stubDir}:${originalPath ?? ""}`;
     try {
-        createDesktopNotifier("linux", {}, lookup)("Proposal ready for review", "/home/u/dotfiles");
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        assert.deepEqual(calls, [["lookup", "/home/u/dotfiles"]]);
+        createDesktopNotifier("linux", {}, async () => "main")("Proposal ready for review", "/home/u/dotfiles");
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal(readFileSync(log, "utf8").trim(), "-a Pi plan mode -- Proposal ready for review dotfiles on main");
     } finally {
-        rmSync(log, { recursive: true, force: true });
+        process.env.PATH = originalPath;
+        rmSync(stubDir, { recursive: true, force: true });
     }
-    assert.equal(stub.length > 0, true);
 });

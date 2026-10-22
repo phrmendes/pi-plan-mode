@@ -16,6 +16,9 @@ import { Type } from "typebox";
 import planMode from "./index.ts";
 import type { PlanProposal } from "./proposal.ts";
 
+// These sessions run for real, so keep them off the desktop notification bus.
+process.env.PI_PLAN_NOTIFY = "off";
+
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
     description: "Simplify the proposal flow so one tool handles submission and acceptance.",

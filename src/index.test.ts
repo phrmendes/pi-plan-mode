@@ -8,6 +8,9 @@ import planMode from "./index.ts";
 import { PROPOSAL_ENTRY, type PlanProposal } from "./proposal.ts";
 import type { PlanModeData, ThinkingLevel } from "./state.ts";
 
+// This suite drives the real extension, so keep it off the desktop notification bus.
+process.env.PI_PLAN_NOTIFY = "off";
+
 const FULL_TOOLS = ["read", "bash", "edit", "write"];
 const PROPOSAL: PlanProposal = {
     description: "Simplify the proposal flow so one tool handles submission and acceptance.",
