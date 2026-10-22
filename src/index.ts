@@ -50,6 +50,8 @@ export default function planMode(pi: ExtensionAPI): void {
         return new Markdown(markdown, 0, 0, getMarkdownTheme());
     });
 
+    const sendDesktop = createDesktopNotifier();
+
     const controller = createPlanController({
         getModes: () => activeProfile().modes,
         getActiveProfile: () => ({ key: activeProfile().key, name: activeProfile().name }),
@@ -81,7 +83,7 @@ export default function planMode(pi: ExtensionAPI): void {
         displayProposal: (markdown) => pi.appendEntry(PROPOSAL_ENTRY, { markdown }),
         sendUserMessage: (message) => pi.sendUserMessage(message),
         loadPrompt: (phase) => prompts.load(phase),
-        notifyDesktop: createDesktopNotifier(),
+        notifyDesktop: (message) => sendDesktop(message, cwd),
     });
 
     pi.registerTool({

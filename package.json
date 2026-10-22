@@ -19,7 +19,7 @@
     ],
     "type": "module",
     "scripts": {
-        "test": "node --test src/config.test.ts src/index.test.ts src/plan.test.ts src/prompts.test.ts src/state.test.ts",
+        "test": "node --test src/config.test.ts src/notify.test.ts src/index.test.ts src/plan.test.ts src/prompts.test.ts src/state.test.ts",
         "test:e2e": "node --test src/e2e.test.ts",
         "check": "pnpm run typecheck && pnpm run format:check && pnpm test && pnpm run test:e2e",
         "typecheck": "tsc -p tsconfig.json",
