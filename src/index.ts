@@ -11,6 +11,7 @@ import {
     type PlanConfig,
 } from "./config.ts";
 import { splitModelRef } from "./planFile.ts";
+import { createDesktopNotifier } from "./notify.ts";
 import { findLocalPlanConfig, planConfigPath } from "./paths.ts";
 import { createPlanController, PLAN_ASK_SCHEMA } from "./plan.ts";
 import { PLAN_TOOLS } from "./policy.ts";
@@ -80,6 +81,7 @@ export default function planMode(pi: ExtensionAPI): void {
         displayProposal: (markdown) => pi.appendEntry(PROPOSAL_ENTRY, { markdown }),
         sendUserMessage: (message) => pi.sendUserMessage(message),
         loadPrompt: (phase) => prompts.load(phase),
+        notifyDesktop: createDesktopNotifier(),
     });
 
     pi.registerTool({

@@ -71,6 +71,8 @@ export interface PlanSessionPort {
     displayProposal(markdown: string): void;
     sendUserMessage(message: string): void;
     loadPrompt(phase: ActivePhase): string | null;
+    /** Sends a desktop notification when the session starts waiting for the user. */
+    notifyDesktop?(message: string): void;
 }
 
 export interface PlanControllerDeps extends PlanConfigPort, PlanToolsPort, PlanModelPort, PlanSessionPort {}
@@ -350,6 +352,7 @@ async function reviewProposal(s: Session, ctx: ExtensionContext): Promise<PlanTo
     const markdown = formatProposal(s.state.proposal);
     if (!ctx.hasUI) return textResult(`Proposal stored. Acceptance requires a UI session.\n\n${markdown}`);
     s.deps.displayProposal(markdown);
+    s.deps.notifyDesktop?.("Proposal ready for review");
     const choice = await ctx.ui.select("Review the proposal above", [REVIEW_ACCEPT, REVIEW_REJECT]);
     if (choice === REVIEW_ACCEPT) {
         await transition(s, ctx, "implementing");
@@ -598,6 +601,7 @@ async function proposePlan(s: Session, proposal: PlanProposal, ctx: ExtensionCon
 async function askQuestions(s: Session, input: PlanAskInput, ctx: ExtensionContext): Promise<PlanToolResult> {
     requireOpenBrainstorming(s);
     if (!ctx.hasUI) return textResult("Clarifying questions require a UI session; none is available.");
+    s.deps.notifyDesktop?.("Questions waiting for your answer");
     const answers: Array<{ question: string; answer: string }> = [];
     for (const item of input.questions) answers.push(await askQuestion(ctx, item.question, item.options));
     return textResult(answers.map((entry) => `Q: ${entry.question}\nA: ${entry.answer}`).join("\n\n"));
@@ -609,6 +613,7 @@ async function completePlan(s: Session, ctx: ExtensionContext): Promise<PlanTool
     if (hasToolsInFlight(s)) throw new Error("plan_complete must run after all implementation tools finish.");
     delete s.state.proposal;
     await transition(s, ctx, "brainstorming");
+    s.deps.notifyDesktop?.("Implementation complete");
     return textResult("Implementation complete. Plan mode remains enabled in brainstorming.");
 }
 

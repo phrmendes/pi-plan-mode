@@ -61,6 +61,7 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
     const displays: unknown[] = [];
     const sent: string[] = [];
     const notes: string[] = [];
+    const desktop: string[] = [];
     let status: string | undefined;
     let thinkingLevel: ThinkingLevel = "medium";
     let profileKey = "default";
@@ -131,6 +132,9 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
             displays.push({ markdown });
         },
         loadPrompt: options.loadPrompt ?? ((phase) => `# ${phase}`),
+        notifyDesktop: (message) => {
+            desktop.push(message);
+        },
     });
 
     const ctx = {
@@ -183,6 +187,7 @@ function createPlanHarness(options: PlanHarnessOptions = {}) {
         displays,
         sent,
         notes,
+        desktop,
     };
 }
 
@@ -305,6 +310,32 @@ test("plan_complete waits for implementation tools to finish", async () => {
     h.controller.onToolExecutionEnd("edit-1");
     await h.controller.complete(h.ctx);
     assert.equal(h.status, "plan: brainstorming");
+});
+
+test("the proposal review notifies before it waits", async () => {
+    const h = startHarness({ choices: ["Reject"] });
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.deepEqual(h.desktop, ["Proposal ready for review"]);
+});
+
+test("a proposal without UI notifies nothing", async () => {
+    const h = startHarness({ hasUI: false });
+    await h.controller.propose(PROPOSAL, h.ctx);
+    assert.deepEqual(h.desktop, []);
+});
+
+test("the clarifying questions notify before they wait", async () => {
+    const h = startHarness({ choices: ["a"] });
+    await h.controller.ask({ questions: [{ question: "q", options: ["a"] }] }, h.ctx);
+    assert.deepEqual(h.desktop, ["Questions waiting for your answer"]);
+});
+
+test("plan_complete notifies that the implementation finished", async () => {
+    const h = startHarness({
+        data: { phase: "implementing", proposal: PROPOSAL, savedTools: FULL_TOOLS },
+    });
+    await h.controller.complete(h.ctx);
+    assert.deepEqual(h.desktop, ["Implementation complete"]);
 });
 
 test("agent_settled reminds once when idle mid-implementation", async () => {
